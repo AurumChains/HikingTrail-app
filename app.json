@@ -3,6 +3,14 @@
     "name": "hiking-app-movil",
     "slug": "hiking-app-movil",
     "version": "1.0.0",
+    "plugins": [
+  [
+    "expo-location",
+    {
+      "locationAlwaysAndWhenInUsePermission": "HikingTrail necesita tu ubicación para trazar tu ruta y compartirla con tu familia, incluso con la pantalla bloqueada."
+    }
+  ]
+],
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
