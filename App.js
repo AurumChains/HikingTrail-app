@@ -7,6 +7,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
+import { cargarCola, encolar, vaciarCola, limpiarCola, pendientes as contarPendientes } from './cola';
 
 const API = 'http://192.168.1.103:3001';
 const CLAVE_TOKEN = 'hikingtrail_token';
@@ -23,7 +24,8 @@ export default function App() {
   const [ubicacion, setUbicacion] = useState(null);
   const [puntos, setPuntos] = useState([]);
   const [enviados, setEnviados] = useState(0);
-  const [fallidos, setFallidos] = useState(0);
+  const [pendientes, setPendientes] = useState(0);
+  const [sinSenal, setSinSenal] = useState(false);
   const [estadisticas, setEstadisticas] = useState(null);
   const [mensaje, setMensaje] = useState('');
 
@@ -31,10 +33,19 @@ export default function App() {
   const tokenRef = useRef(null);
   const suscripcion = useRef(null);
 
-  useEffect(() => {
+    useEffect(() => {
     revisarSesionGuardada();
+    // Puntos que quedaron sin enviar la ultima vez que se uso la app
+    cargarCola().then(setPendientes);
     return () => soltarGPS();
   }, []);
+
+  // Reintento periodico mientras haya una ruta activa
+  useEffect(() => {
+    if (!ruta) return;
+    const temporizador = setInterval(intentarEnviar, 15000);
+    return () => clearInterval(temporizador);
+  }, [ruta]);
 
   async function revisarSesionGuardada() {
     try {
@@ -120,12 +131,15 @@ export default function App() {
       setRuta(datos.ruta);
       setPuntos([]);
       setEnviados(0);
-      setFallidos(0);
+      await limpiarCola();
+      setPendientes(0);
+      setSinSenal(false);
       await escucharGPS();
     } catch (err) {
       setMensaje('No hay conexión con el servidor');
     }
   }
+
 
   async function escucharGPS() {
     suscripcion.current = await Location.watchPositionAsync(
@@ -139,41 +153,52 @@ export default function App() {
           ...previos,
           { latitude: c.latitude, longitude: c.longitude },
         ]);
-        enviarPunto(c);
+        encolarYEnviar(c);
       }
     );
   }
 
-  async function enviarPunto(coords) {
-    const rutaId = rutaRef.current;
-    const token = tokenRef.current;
-    if (!rutaId || !token) return;
+    // El punto se guarda en disco PRIMERO. Recien despues se intenta enviar.
+  // Ese orden es todo: si la app se cierra o no hay señal, el punto ya
+  // está a salvo.
+  async function encolarYEnviar(coords) {
+    const total = await encolar({
+      lat: coords.latitude,
+      lon: coords.longitude,
+      altitude: coords.altitude,
+      accuracy: coords.accuracy,
+      speed: coords.speed,
+      timestamp: new Date().toISOString(),
+    });
+    setPendientes(total);
+    intentarEnviar();
+  }
 
-    try {
-      const respuesta = await fetch(`${API}/api/routes/${rutaId}/location`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          lat: coords.latitude,
-          lon: coords.longitude,
-          altitude: coords.altitude,
-          accuracy: coords.accuracy,
-          speed: coords.speed,
-        }),
-      });
-      if (respuesta.ok) setEnviados((n) => n + 1);
-      else setFallidos((n) => n + 1);
-    } catch (err) {
-      setFallidos((n) => n + 1);
+  async function intentarEnviar() {
+    const resultado = await vaciarCola({
+      api: API,
+      rutaId: rutaRef.current,
+      token: tokenRef.current,
+    });
+
+    setPendientes(resultado.pendientes);
+    if (resultado.enviados > 0) {
+      setEnviados((n) => n + resultado.enviados);
+      setSinSenal(false);
     }
+    if (resultado.sinSenal) setSinSenal(true);
   }
 
   async function terminarRuta() {
     const rutaId = rutaRef.current;
     soltarGPS();
+
+    // Vaciar lo pendiente ANTES de cerrar: si quedan puntos sin enviar,
+    // las estadisticas saldrian con la ruta a medias.
+    for (let i = 0; i < 5 && contarPendientes() > 0; i++) {
+      await intentarEnviar();
+    }
+
     try {
       const respuesta = await fetch(`${API}/api/routes/${rutaId}/finish`, {
         method: 'POST',
@@ -306,10 +331,18 @@ export default function App() {
               <Text style={e.valor}>{enviados}</Text>
             </View>
             <View style={e.celda}>
-              <Text style={e.etiqueta}>FALLIDOS</Text>
-              <Text style={fallidos > 0 ? e.valorRojo : e.valor}>{fallidos}</Text>
+              <Text style={e.etiqueta}>EN COLA</Text>
+              <Text style={pendientes > 0 ? e.valorRojo : e.valor}>{pendientes}</Text>
             </View>
           </View>
+
+          {sinSenal && (
+            <View style={e.avisoSinSenal}>
+              <Text style={e.textoSinSenal}>
+                Sin señal · {pendientes} punto{pendientes === 1 ? '' : 's'} guardado{pendientes === 1 ? '' : 's'} en el teléfono
+              </Text>
+            </View>
+          )}
 
           <Pressable style={e.botonRojo} onPress={terminarRuta}>
             <Text style={e.textoRojo}>Terminar ruta</Text>
@@ -415,6 +448,11 @@ const e = StyleSheet.create({
   textoRojo: { color: '#E2504E', fontSize: 17, fontWeight: '600' },
   botonSecundario: { height: 50, borderWidth: 1, borderColor: '#2A312E', borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   textoSecundario: { color: '#EDEFEC', fontSize: 16, fontWeight: '500' },
+  avisoSinSenal: {
+    backgroundColor: '#1E1413', borderWidth: 1, borderColor: '#4A2A2A',
+    borderRadius: 10, padding: 12,
+  },
+  textoSinSenal: { color: '#F0A9A7', fontSize: 13 },
   error: { color: '#E2504E', fontSize: 14 },
   aviso: { color: '#E9A44A', fontSize: 14 },
   saludo: { color: '#EDEFEC', fontSize: 28, fontWeight: '700' },
