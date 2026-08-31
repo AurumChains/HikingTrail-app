@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { pedir } from '../api';
 import { C, g } from '../estilos';
+import EnVivo from './EnVivo';
 
 /**
  * La mitad "familiar": quien de los mios esta caminando ahora.
@@ -14,6 +15,7 @@ export default function Familia({ token }) {
   const [rutas, setRutas] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [mensaje, setMensaje] = useState('');
+  const [rutaAbierta, setRutaAbierta] = useState(null);
 
   useEffect(() => {
     cargar();
@@ -28,6 +30,18 @@ export default function Familia({ token }) {
     if (!ok) return setMensaje(datos?.error || 'No se pudieron cargar las rutas');
 
     setRutas(datos.rutas || []);
+  }
+
+  // Con una ruta abierta, esta pantalla cede el paso al mapa en vivo.
+  // Al volver se recarga la lista, por si algo cambio mientras tanto.
+  if (rutaAbierta) {
+    return (
+      <EnVivo
+        token={token}
+        ruta={rutaAbierta}
+        onVolver={() => { setRutaAbierta(null); cargar(); }}
+      />
+    );
   }
 
   if (cargando) {
@@ -86,8 +100,8 @@ export default function Familia({ token }) {
               <Text style={g.valorGrande}>{r.total_puntos}</Text>
             </View>
 
-            <Pressable style={[g.boton, e.botonDeshabilitado]} disabled>
-              <Text style={g.textoBoton}>Ver en el mapa (pronto)</Text>
+            <Pressable style={g.boton} onPress={() => setRutaAbierta(r)}>
+              <Text style={g.textoBoton}>Ver en el mapa</Text>
             </Pressable>
           </View>
         ))}
@@ -111,5 +125,4 @@ const e = StyleSheet.create({
   },
   puntito: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.acento },
   chipTexto: { color: C.acento, fontSize: 11, fontWeight: '700', letterSpacing: 0.7 },
-  botonDeshabilitado: { opacity: 0.45 },
 });
