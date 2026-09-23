@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, Pressable, StyleSheet, ScrollView,
+  View, Text, Pressable, StyleSheet, ScrollView, TextInput,
   ActivityIndicator, SafeAreaView,
 } from 'react-native';
 import * as Location from 'expo-location';
@@ -28,6 +28,15 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   const [estadisticas, setEstadisticas] = useState(null);
   const [mensaje, setMensaje] = useState('');
 
+  // Con quien se va a compartir esta salida, y como se va a llamar.
+  const [grupos, setGrupos] = useState([]);
+  const [grupoElegido, setGrupoElegido] = useState(null);
+  const [nombreRuta, setNombreRuta] = useState('');
+
+  // Si al intentar empezar quedo una ruta abierta de antes, aqui
+  // guardamos su id para poder ofrecer cerrarla.
+  const [rutaBloqueada, setRutaBloqueada] = useState(null);
+
   const [pausada, setPausada] = useState(false);
   const [pausadaDesde, setPausadaDesde] = useState(null);
   const [segundosPausa, setSegundosPausa] = useState(0);
@@ -51,6 +60,29 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   useEffect(() => {
     if (onCambioRuta) onCambioRuta(Boolean(ruta));
   }, [ruta]);
+
+  // Los grupos se recargan cada vez que se vuelve a la pantalla de
+  // inicio, no solo al abrir la app: si el usuario acaba de crear un
+  // grupo en la otra pestana, tiene que aparecer aca sin reiniciar.
+  useEffect(() => {
+    if (!ruta) cargarGrupos();
+  }, [ruta]);
+
+  async function cargarGrupos() {
+    const { ok, datos } = await pedir('/api/groups', { token });
+    if (!ok) return;
+
+    const lista = datos.grupos || [];
+    setGrupos(lista);
+
+    // Si pertenece a un solo grupo, viene marcado: es lo que va a
+    // querer el 90% de las veces. Si tiene varios, elige a proposito.
+    // En ningun caso se comparte sin que el usuario lo vea en pantalla.
+    setGrupoElegido((actual) => {
+      if (actual && lista.some((x) => x.id === actual)) return actual;
+      return lista.length === 1 ? lista[0].id : null;
+    });
+  }
 
   // Reintento periodico mientras haya ruta activa
   useEffect(() => {
@@ -123,10 +155,11 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   }
 
   // ---------------- Acciones de ruta ----------------
-
-  async function empezarRuta() {
+  // Si no se borra al empezar el boton de queda pegado en la pantalla.
+    async function empezarRuta() {
     setMensaje('');
     setEstadisticas(null);
+    setRutaBloqueada(null);
 
     const permiso = await Location.requestForegroundPermissionsAsync();
     if (permiso.status !== 'granted') {
@@ -135,11 +168,25 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     }
 
     const { ok, datos, sinRed } = await pedir('/api/routes/start', {
-      metodo: 'POST', token, cuerpo: { name: 'Salida de prueba' },
+      metodo: 'POST', token,
+      cuerpo: {
+        name: nombreRuta.trim() || 'Salida sin nombre',
+        group_id: grupoElegido,
+      },
     });
 
     if (sinRed) return setMensaje('No hay conexión con el servidor');
-    if (!ok) return setMensaje(datos?.error || 'No se pudo iniciar la ruta');
+    if (!ok) {
+      // El backend no solo dice "ya tienes una ruta activa": ademas
+      // devuelve CUAL es, en datos.route_id. Se diseno asi desde el
+      // principio justo para esto. Con ese numero podemos ofrecer
+      // cerrarla, en vez de dejar al usuario atrapado sin salida.
+      if (datos?.route_id) {
+        setRutaBloqueada(datos.route_id);
+        return setMensaje('Quedó una ruta sin terminar de la vez anterior.');
+      }
+      return setMensaje(datos?.error || 'No se pudo iniciar la ruta');
+    }
 
     rutaRef.current = datos.ruta.id;
     setRuta(datos.ruta);
@@ -152,6 +199,22 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     setPausadaDesde(null);
     setParadas(0);
     await escucharGPS();
+  }
+
+    async function cerrarRutaVieja() {
+    setMensaje('Cerrando la ruta anterior...');
+
+    const { ok, datos } = await pedir(`/api/routes/${rutaBloqueada}/finish`, {
+      metodo: 'POST', token,
+    });
+
+    if (!ok) {
+      return setMensaje(datos?.error || 'No se pudo cerrar la ruta anterior');
+    }
+
+    // Encadenar el arranque evita que el usuario tenga que dar dos
+    // toques: cierra la vieja y arranca la nueva de una sola vez.
+    await empezarRuta();
   }
 
   async function pausar() {
@@ -359,7 +422,60 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
           </View>
         )}
 
+        <View style={g.campo}>
+          <Text style={g.etiqueta}>NOMBRE DE LA SALIDA</Text>
+          <TextInput
+            style={g.input}
+            value={nombreRuta}
+            onChangeText={setNombreRuta}
+            placeholder="Cerro Manquehue"
+            placeholderTextColor={C.placeholder}
+            maxLength={60}
+          />
+        </View>
+
+        <View style={{ gap: 10 }}>
+          <Text style={g.etiqueta}>COMPARTIR CON</Text>
+
+          {grupos.length === 0 ? (
+            <Text style={e.pista}>
+              No estás en ningún grupo. Ve a la pestaña Grupos para crear uno
+              o unirte con un código. Sin grupo, nadie verá esta ruta.
+            </Text>
+          ) : (
+            <View style={e.opciones}>
+              {grupos.map((gr) => (
+                <Pressable
+                  key={gr.id}
+                  style={grupoElegido === gr.id ? e.opcionActiva : e.opcion}
+                  onPress={() => setGrupoElegido(gr.id)}
+                >
+                  <Text style={grupoElegido === gr.id ? e.opcionTextoActivo : e.opcionTexto}>
+                    {gr.name}
+                  </Text>
+                </Pressable>
+              ))}
+
+              {/* Nadie: la ruta se guarda igual, pero es privada. */}
+              <Pressable
+                style={grupoElegido === null ? e.opcionActiva : e.opcion}
+                onPress={() => setGrupoElegido(null)}
+              >
+                <Text style={grupoElegido === null ? e.opcionTextoActivo : e.opcionTexto}>
+                  Solo yo
+                </Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+
         {mensaje !== '' && <Text style={g.aviso}>{mensaje}</Text>}
+
+        {rutaBloqueada && (
+          <Pressable style={g.botonSecundario} onPress={cerrarRutaVieja}>
+            <Text style={g.textoSecundario}>Cerrar la ruta anterior y empezar</Text>
+          </Pressable>
+        )}
 
         <Pressable style={g.boton} onPress={empezarRuta}>
           <Text style={g.textoBoton}>Empezar ruta</Text>
@@ -375,6 +491,19 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
 
 const e = StyleSheet.create({
   inicio: { padding: 24, paddingTop: 20, gap: 18 },
+  pista: { color: C.tenue, fontSize: 13, lineHeight: 19 },
+
+  opciones: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  opcion: {
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999,
+    borderWidth: 1, borderColor: C.borde, backgroundColor: C.superficie,
+  },
+  opcionActiva: {
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999,
+    borderWidth: 1, borderColor: C.acento, backgroundColor: 'rgba(233,164,74,0.14)',
+  },
+  opcionTexto: { color: C.apagado, fontSize: 14, fontWeight: '500' },
+  opcionTextoActivo: { color: C.acento, fontSize: 14, fontWeight: '600' },
 
   encimaMapa: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'center' },
   chip: {

@@ -9,12 +9,13 @@ import { C, g } from './estilos';
 import Login from './pantallas/Login';
 import Montanista from './pantallas/Montanista';
 import Familia from './pantallas/Familia';
+import Grupos from './pantallas/Grupos';
 
 /**
  * La puerta de entrada de la app. Solo hace tres cosas:
  *   1. Averiguar si hay sesion guardada
  *   2. Mostrar el login o la app
- *   3. Cambiar entre las dos pestañas
+ *   3. Cambiar entre las tres pestañas
  *
  * Toda la logica de rutas y GPS vive en pantallas/Montanista.js
  */
@@ -78,16 +79,16 @@ export default function App() {
       <StatusBar style="light" />
 
       <View style={{ flex: 1 }}>
-        {modo === 'montanista' ? (
+        {modo === 'montanista' && (
           <Montanista
             token={token}
             usuario={usuario}
             onSalir={salir}
             onCambioRuta={setRutaActiva}
           />
-        ) : (
-          <Familia token={token} usuario={usuario} />
         )}
+        {modo === 'familia' && <Familia token={token} usuario={usuario} />}
+        {modo === 'grupos' && <Grupos token={token} usuario={usuario} />}
       </View>
 
       {/* La barra se esconde mientras el mapa esta a pantalla completa */}
@@ -102,6 +103,11 @@ export default function App() {
             texto="Familia"
             activa={modo === 'familia'}
             onPress={() => setModo('familia')}
+          />
+          <Pestana
+            texto="Grupos"
+            activa={modo === 'grupos'}
+            onPress={() => setModo('grupos')}
           />
         </View>
       )}
