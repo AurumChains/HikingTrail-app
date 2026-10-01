@@ -17,7 +17,7 @@ const NUBE = 'https://hikingtrail-api.onrender.com';
 const LOCAL = 'http://192.168.1.103:3001';
 
 // ---- USANDO ----
-export const API = NUBE;
+export const API = LOCAL;
 // export const API = LOCAL;
 
 export const CLAVE_TOKEN = 'hikingtrail_token';
