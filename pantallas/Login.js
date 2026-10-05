@@ -45,7 +45,7 @@ export default function Login({ onEntrar }) {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <View style={e.cabecera}>
-          <Text style={e.marca}>HikingTrail</Text>
+          <Text style={e.marca}>GeoTrail</Text>
           <Text style={e.lema}>
             Tu familia sabe dónde estás, aunque tú no tengas señal.
           </Text>

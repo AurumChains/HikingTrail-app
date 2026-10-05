@@ -16,7 +16,7 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "HikingTrail necesita tu ubicación para trazar tu ruta y compartirla con tu familia, incluso con la pantalla bloqueada."
+          "locationAlwaysAndWhenInUsePermission": "GeoTrail necesita tu ubicación para trazar tu ruta y compartirla con tu familia, incluso con la pantalla bloqueada."
         }
       ],
       "expo-secure-store",

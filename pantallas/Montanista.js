@@ -499,7 +499,7 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     // El plan muere con la ruta: la proxima salida elige su destino.
     setCaminoPlan(null);
     setInfoPlan(null);
-    setLugarElegido(null);
+    setDestino(null);
 
     // Reubicarse para que el mapa de inicio no quede en el punto de
     // partida de la ruta que acaba de terminar.
