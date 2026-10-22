@@ -27,6 +27,11 @@ export default function EnVivo({ token, ruta, onVolver }) {
   const [error, setError] = useState('');
   const [ultimaSenal, setUltimaSenal] = useState(null);
   const [segundosSinSenal, setSegundosSinSenal] = useState(0);
+  const [estado, setEstado] = useState(ruta.status || 'in_progress');
+
+  // El ultimo aviso que empujo el servidor: desvio, vuelta al camino,
+  // y mas adelante tambien detencion prolongada.
+  const [aviso, setAviso] = useState(null);
 
   const socketRef = useRef(null);
   const mapaRef = useRef(null);
@@ -69,6 +74,7 @@ export default function EnVivo({ token, ruta, onVolver }) {
 
     setError('');
     setEstadisticas(datos.estadisticas);
+    if (datos.ruta?.status) setEstado(datos.ruta.status);
 
     const coords = (datos.puntos || []).map((p) => ({
       latitude: Number(p.lat),
@@ -118,6 +124,19 @@ export default function EnVivo({ token, ruta, onVolver }) {
       // Mover la camara para seguir a la persona
       mapaRef.current?.animateCamera({ center: coord }, { duration: 800 });
     });
+
+    // Avisos del servidor. Llegan por el MISMO canal que los puntos,
+    // asi que si el mapa se esta moviendo, el aviso tambien llega: no
+    // hay forma de estar viendo la ruta y perderse la alerta.
+    socket.on('alerta', (a) => {
+      setAviso(a);
+
+      // Volver al camino no deja un cartel rojo colgado para siempre:
+      // se muestra un momento y se va solo.
+      if (a.tipo === 'back_on_route') {
+        setTimeout(() => setAviso(null), 8000);
+      }
+    });
   }
 
   function desconectar() {
@@ -135,7 +154,14 @@ export default function EnVivo({ token, ruta, onVolver }) {
     return `hace ${Math.floor(m / 60)}h ${m % 60}m`;
   }
 
-  const alerta = segundosSinSenal > 300;
+  const pausada = estado === 'paused';
+
+  // Pausada NO dispara la alarma. Dejan de llegar puntos porque la
+  // persona solto el GPS a proposito, no porque se haya perdido la
+  // senal. Avisar "SIN SENAL" aqui seria una falsa alarma, y las
+  // falsas alarmas son lo que hace que la gente deje de creerle a
+  // una app de seguridad.
+  const alerta = !pausada && segundosSinSenal > 300;
   const posicionActual = puntos[puntos.length - 1];
 
   if (cargando) {
@@ -209,10 +235,12 @@ export default function EnVivo({ token, ruta, onVolver }) {
             <Text style={e.subnombre}>{ruta.name}</Text>
           </View>
 
-          <View style={conexion === 'en_vivo' && !alerta ? e.chipVivo : e.chipMal}>
-            <View style={conexion === 'en_vivo' && !alerta ? e.punto : e.puntoMal} />
-            <Text style={conexion === 'en_vivo' && !alerta ? e.chipTexto : e.chipTextoMal}>
-              {conexion === 'en_vivo' ? (alerta ? 'SIN SEÑAL' : 'EN VIVO') : 'CONECTANDO'}
+          <View style={pausada ? e.chipPausa : (conexion === 'en_vivo' && !alerta ? e.chipVivo : e.chipMal)}>
+            <View style={pausada ? e.puntoGris : (conexion === 'en_vivo' && !alerta ? e.punto : e.puntoMal)} />
+            <Text style={pausada ? e.chipTextoPausa : (conexion === 'en_vivo' && !alerta ? e.chipTexto : e.chipTextoMal)}>
+              {pausada
+                ? 'EN PAUSA'
+                : (conexion === 'en_vivo' ? (alerta ? 'SIN SEÑAL' : 'EN VIVO') : 'CONECTANDO')}
             </Text>
           </View>
         </View>
@@ -220,6 +248,34 @@ export default function EnVivo({ token, ruta, onVolver }) {
 
       <View style={e.panel}>
         <View style={e.agarradera} />
+
+        {aviso && aviso.tipo === 'off_route' && (
+          <View style={e.desvioCaja}>
+            <Text style={e.desvioTitulo}>
+              {ruta.montanista} se salió del camino
+            </Text>
+            <Text style={e.desvioTexto}>
+              {aviso.mensaje}. La línea gris es el camino previsto y la
+              naranja por donde va realmente.
+            </Text>
+          </View>
+        )}
+
+        {aviso && aviso.tipo === 'back_on_route' && (
+          <View style={e.vueltaCaja}>
+            <Text style={e.vueltaTexto}>{ruta.montanista} volvió al camino previsto</Text>
+          </View>
+        )}
+
+        {pausada && (
+          <View style={e.pausaCaja}>
+            <Text style={e.pausaTitulo}>{ruta.montanista} está en pausa</Text>
+            <Text style={e.pausaTexto}>
+              Se detuvo a propósito. La ubicación no se actualiza mientras
+              esté en pausa, y vuelve sola si empieza a caminar.
+            </Text>
+          </View>
+        )}
 
         {alerta && (
           <View style={e.alertaCaja}>
@@ -293,6 +349,30 @@ const e = StyleSheet.create({
   punto: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.acento },
   puntoMal: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.alerta },
   chipTexto: { color: C.acento, fontSize: 10, fontWeight: '700', letterSpacing: 0.7 },
+  chipPausa: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(139,149,143,0.16)',
+    paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
+  },
+  puntoGris: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.apagado },
+  chipTextoPausa: { color: C.apagado, fontSize: 10, fontWeight: '700', letterSpacing: 0.7 },
+  desvioCaja: {
+    backgroundColor: C.alertaFondo, borderWidth: 1, borderColor: C.bordeRojo,
+    borderRadius: 12, padding: 14, gap: 6,
+  },
+  desvioTitulo: { color: C.alertaTexto, fontSize: 15, fontWeight: '700' },
+  desvioTexto: { color: '#B58A88', fontSize: 13, lineHeight: 19 },
+  vueltaCaja: {
+    backgroundColor: 'rgba(233,164,74,0.12)', borderWidth: 1, borderColor: '#4A3A1E',
+    borderRadius: 12, padding: 12,
+  },
+  vueltaTexto: { color: C.acento, fontSize: 14, fontWeight: '600' },
+  pausaCaja: {
+    backgroundColor: C.superficie2, borderWidth: 1, borderColor: C.borde,
+    borderRadius: 12, padding: 14, gap: 6,
+  },
+  pausaTitulo: { color: C.texto, fontSize: 15, fontWeight: '700' },
+  pausaTexto: { color: C.apagado, fontSize: 13, lineHeight: 19 },
   chipTextoMal: { color: C.alerta, fontSize: 10, fontWeight: '700', letterSpacing: 0.7 },
 
   panel: {

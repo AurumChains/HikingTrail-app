@@ -66,7 +66,14 @@ export async function vaciarCola({ api, rutaId, token }) {
       const datos = await respuesta.json();
       cola = cola.slice(lote.length);
       await guardar();
-      return { enviados: datos.guardados ?? lote.length, pendientes: cola.length };
+      // El backend aprovecha el mismo viaje para decir si la persona
+      // se salio del camino. Se pasa hacia arriba tal cual: la cola no
+      // decide nada, solo transporta.
+      return {
+        enviados: datos.guardados ?? lote.length,
+        pendientes: cola.length,
+        desvio: datos.desvio ?? null,
+      };
     }
 
     // 4xx = el servidor rechaza el lote y siempre lo va a rechazar

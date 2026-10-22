@@ -89,10 +89,20 @@ export default function Familia({ token }) {
                 <Text style={e.nombre}>{r.montanista}</Text>
                 <Text style={g.subtexto}>{r.name}</Text>
               </View>
-              <View style={e.chipVivo}>
-                <View style={e.puntito} />
-                <Text style={e.chipTexto}>EN VIVO</Text>
-              </View>
+              {/* Pausado y en marcha se ven distinto. Un punto congelado
+                  con la etiqueta "EN VIVO" hace creer al familiar que esa
+                  es la posicion actual, y no lo es. */}
+              {r.status === 'paused' ? (
+                <View style={e.chipPausa}>
+                  <View style={e.puntitoGris} />
+                  <Text style={e.chipTextoPausa}>EN PAUSA</Text>
+                </View>
+              ) : (
+                <View style={e.chipVivo}>
+                  <View style={e.puntito} />
+                  <Text style={e.chipTexto}>EN VIVO</Text>
+                </View>
+              )}
             </View>
 
             <View style={g.fila}>
@@ -125,4 +135,11 @@ const e = StyleSheet.create({
   },
   puntito: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.acento },
   chipTexto: { color: C.acento, fontSize: 11, fontWeight: '700', letterSpacing: 0.7 },
+  chipPausa: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(139,149,143,0.14)',
+    paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999,
+  },
+  puntitoGris: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.apagado },
+  chipTextoPausa: { color: C.apagado, fontSize: 11, fontWeight: '700', letterSpacing: 0.7 },
 });

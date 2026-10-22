@@ -21,6 +21,31 @@ import {
  * de salir se ve a donde se va y por donde; despues se ve por donde se
  * va yendo de verdad. Es la misma vista en dos momentos.
  */
+// Metros que hay que alejarse del punto de pausa para que la ruta se
+// reanude sola. 60 y no 40: parado, la senal del GPS "baila" entre 10 y
+// 20 metros, y en ciudad mas. A 60 metros ya no hay duda de que la
+// persona se movio de verdad.
+const METROS_PARA_REANUDAR = 60;
+
+/**
+ * Distancia en metros entre dos coordenadas (formula de Haversine).
+ *
+ * Se calcula en el telefono y no en el servidor a proposito: durante
+ * la pausa no se manda nada a la red, asi que la comprobacion tiene
+ * que poder hacerse sin conexion.
+ */
+function distanciaMetros(a, b) {
+  const R = 6371000;
+  const aLat = (a.latitude * Math.PI) / 180;
+  const bLat = (b.latitude * Math.PI) / 180;
+  const dLat = bLat - aLat;
+  const dLon = ((b.longitude - a.longitude) * Math.PI) / 180;
+
+  const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(aLat) * Math.cos(bLat) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
 export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   const [ruta, setRuta] = useState(null);
   const [ubicacion, setUbicacion] = useState(null);
@@ -28,6 +53,9 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   const [enviados, setEnviados] = useState(0);
   const [pendientes, setPendientes] = useState(0);
   const [sinSenal, setSinSenal] = useState(false);
+
+  // Lo ultimo que dijo el servidor sobre el desvio: { fuera_de_ruta, desvio_m }
+  const [desvio, setDesvio] = useState(null);
   const [estadisticas, setEstadisticas] = useState(null);
   const [mensaje, setMensaje] = useState('');
 
@@ -79,12 +107,17 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   const suscripcion = useRef(null);
   const mapaInicio = useRef(null);
 
+  // Vigilancia durante la pausa: donde se pauso, y el watcher de
+  // baja precision que comprueba si la persona empezo a moverse.
+  const anclaPausa = useRef(null);
+  const vigilancia = useRef(null);
+
   useEffect(() => { tokenRef.current = token; }, [token]);
 
   useEffect(() => {
     cargarCola().then(setPendientes);
     revisarPermiso();
-    return () => soltarGPS();
+    return () => { soltarGPS(); soltarVigilancia(); };
   }, []);
 
   // Avisar a App.js si el mapa esta ocupando la pantalla
@@ -320,6 +353,43 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     }
   }
 
+  /**
+   * GPS en "modo vigilancia" mientras la ruta esta pausada.
+   *
+   * Precision baja y solo despierta cada 50 metros: NO graba la ruta,
+   * solo comprueba si la persona volvio a caminar. Gasta poca bateria
+   * justamente porque casi nunca se dispara.
+   *
+   * Existe porque pausar y olvidarse es un fallo real y peligroso: el
+   * familiar se queda mirando un punto congelado creyendo que es la
+   * posicion actual.
+   */
+  async function vigilarMovimiento() {
+    vigilancia.current = await Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.Balanced, timeInterval: 20000, distanceInterval: 50 },
+      (posicion) => {
+        const ancla = anclaPausa.current;
+        if (!ancla) return;
+
+        const c = posicion.coords;
+        const metros = distanciaMetros(ancla, c);
+
+        if (metros >= METROS_PARA_REANUDAR) {
+          soltarVigilancia();
+          reanudar(true);
+        }
+      }
+    );
+  }
+
+  function soltarVigilancia() {
+    if (vigilancia.current) {
+      vigilancia.current.remove();
+      vigilancia.current = null;
+    }
+    anclaPausa.current = null;
+  }
+
   async function encolarYEnviar(coords) {
     const total = await encolar({
       lat: coords.latitude,
@@ -346,6 +416,11 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
       setSinSenal(false);
     }
     if (resultado.sinSenal) setSinSenal(true);
+
+    // Solo se pisa cuando el servidor dijo algo. Si el envio fallo, se
+    // conserva el ultimo estado conocido en vez de borrarlo: quedarse
+    // sin aviso por un problema de red seria lo peor que podria pasar.
+    if (resultado.desvio) setDesvio(resultado.desvio);
   }
 
   // Reintento periodico mientras haya ruta activa
@@ -414,6 +489,7 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
 
     setPuntos([]);
     setEnviados(0);
+    setDesvio(null);
     await limpiarCola();
     setPendientes(0);
     setSinSenal(false);
@@ -450,17 +526,33 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     if (sinRed) return setMensaje('Sin conexión: no se pudo pausar');
     if (!ok) return setMensaje(datos?.error || 'No se pudo pausar');
 
-    // Se suelta el GPS durante la parada. Parado, la senal "baila" unos
-    // metros y esa deriva se sumaria como distancia que nunca caminaste.
-    // Ademas ahorra bateria en una parada larga.
+    // Se suelta el GPS de alta precision durante la parada. Parado, la
+    // senal "baila" unos metros y esa deriva se sumaria como distancia
+    // que nunca caminaste. Ademas ahorra bateria en una parada larga.
     soltarGPS();
     setPausada(true);
     setPausadaDesde(Date.now());
     setSegundosPausa(0);
+
+    // Pero no se queda ciego: se ancla el punto de pausa y se vigila
+    // con bajo consumo por si la persona empieza a caminar otra vez.
+    if (ubicacion) {
+      anclaPausa.current = {
+        latitude: ubicacion.latitude,
+        longitude: ubicacion.longitude,
+      };
+      await vigilarMovimiento();
+    }
   }
 
-  async function reanudar() {
+  /**
+   * @param {boolean} automatico - true si lo dispara la vigilancia
+   *   porque la persona se movio, false si toco el boton.
+   */
+  async function reanudar(automatico = false) {
     setMensaje('');
+    soltarVigilancia();
+
     const { ok, datos, sinRed } = await pedir(
       `/api/routes/${rutaRef.current}/resume`, { metodo: 'POST', token }
     );
@@ -471,12 +563,20 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     setPausada(false);
     setPausadaDesde(null);
     setParadas((n) => n + 1);
+
+    // Se avisa SIEMPRE que fue automatico. Volver a compartir la
+    // ubicacion sin decirlo seria exactamente lo que esta app no hace.
+    if (automatico) {
+      setMensaje('Se reanudó la ruta porque empezaste a moverte.');
+    }
+
     await escucharGPS();
   }
 
   async function terminarRuta() {
     const rutaId = rutaRef.current;
     soltarGPS();
+    soltarVigilancia();
 
     // Vaciar lo pendiente ANTES de cerrar, o las estadisticas
     // saldrian con la ruta a medias.
@@ -592,6 +692,17 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
               {pausada ? 'EN PAUSA' : 'EN CURSO'}
             </Text>
           </View>
+
+          {/* Quien camina se entera ANTES que su familia. No es un
+              castigo por salirse: muchas veces el desvio es voluntario
+              (una calle cortada) y basta con saber que el aviso salio. */}
+          {desvio?.fuera_de_ruta && !pausada && (
+            <View style={e.chipDesvio}>
+              <Text style={e.chipTextoDesvio}>
+                FUERA DEL CAMINO · {desvio.desvio_m} m
+              </Text>
+            </View>
+          )}
         </SafeAreaView>
 
         <View style={e.panel}>
@@ -635,7 +746,10 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
           {mensaje !== '' && <Text style={g.aviso}>{mensaje}</Text>}
 
           <View style={e.botonera}>
-            <Pressable style={e.botonPrincipal} onPress={pausada ? reanudar : pausar}>
+            {/* La flecha es obligatoria: sin ella, onPress le pasaria el
+                evento del toque como primer argumento y reanudar() lo
+                interpretaria como automatico = true. */}
+            <Pressable style={e.botonPrincipal} onPress={() => (pausada ? reanudar() : pausar())}>
               <Text style={g.textoBoton}>{pausada ? 'Reanudar' : 'Pausar'}</Text>
             </Pressable>
             <Pressable style={e.botonRojoChico} onPress={terminarRuta}>
@@ -969,6 +1083,11 @@ const e = StyleSheet.create({
   puntitoGris: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.apagado },
   chipTexto: { color: C.acento, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
   chipTextoPausa: { color: C.apagado, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  chipDesvio: {
+    backgroundColor: 'rgba(30,20,19,0.95)', borderWidth: 1, borderColor: C.bordeRojo,
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, marginTop: 8,
+  },
+  chipTextoDesvio: { color: C.alertaTexto, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
 
   panel: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
