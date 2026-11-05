@@ -1,4 +1,4 @@
-# HikingTrail — Aplicación móvil
+# GeoTrail — Aplicación móvil
 
 App de React Native (con Expo) para compartir ubicación en tiempo real
 durante un desplazamiento a pie.

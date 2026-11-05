@@ -23,6 +23,17 @@ export const C = {
   alerta: '#E2504E',
   alertaFondo: '#1E1413',
   alertaTexto: '#F0A9A7',
+
+  // Lineas de ruta en el mapa.
+  //
+  // ruta: el camino sugerido, lo que falta por andar. Verde brillante
+  // para que se distinga del terreno en cualquier mapa, de dia y de
+  // noche: es lo que hay que mirar.
+  ruta: '#39FF14',
+  // rutaRecorrida: por donde ya paso la persona. Verde apagado y
+  // opaco, dibujado ENCIMA del sugerido: el tramo ya caminado se ve
+  // gastado y lo que queda por delante sigue brillante.
+  rutaRecorrida: '#2F7D32',
 };
 
 /** Estilos que se repiten en varias pantallas. */

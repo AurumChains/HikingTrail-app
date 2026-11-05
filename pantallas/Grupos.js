@@ -4,7 +4,10 @@ import {
   ActivityIndicator, SafeAreaView, RefreshControl,
 } from 'react-native';
 import { pedir } from '../api';
+import { verificarClaveLocal } from '../emergencia';
 import { C, g } from '../estilos';
+import ChatGrupo from './ChatGrupo';
+import EnVivo from './EnVivo';
 
 /**
  * Grupos: con quien comparte sus rutas el montanista.
@@ -23,6 +26,13 @@ export default function Grupos({ token, usuario }) {
   const [vista, setVista] = useState('lista');
   const [grupos, setGrupos] = useState([]);
   const [detalle, setDetalle] = useState(null);
+  // El grupo tal como venia en la lista. Permite mostrar el nombre y
+  // abrir el chat al instante, sin esperar a que cargue el detalle.
+  const [grupoAbierto, setGrupoAbierto] = useState(null);
+  const [pestana, setPestana] = useState('chat');
+  // La ruta de un miembro abierta en el mapa en vivo, o null.
+  const [rutaEnVivo, setRutaEnVivo] = useState(null);
+  const [refrescando, setRefrescando] = useState(false);
   const [cargando, setCargando] = useState(true);
   const [mensaje, setMensaje] = useState('');
   const [error, setError] = useState('');
@@ -61,7 +71,7 @@ export default function Grupos({ token, usuario }) {
 
     setNombreNuevo('');
     setVista('lista');
-    setMensaje(`Grupo "${datos.grupo.name}" creado. Comparte el código ${datos.grupo.invite_code}.`);
+    setMensaje(`Grupo "${datos.grupo.name}" creado. Entra en él y toca el código para verlo y compartirlo.`);
     await cargar();
   }
 
@@ -87,6 +97,9 @@ export default function Grupos({ token, usuario }) {
   async function abrirDetalle(grupo) {
     setError('');
     setDetalle(null);
+    setGrupoAbierto(grupo);
+    setRutaEnVivo(null);
+    setPestana('chat');
     setVista('detalle');
 
     const { ok, datos, sinRed } = await pedir(`/api/groups/${grupo.id}`, { token });
@@ -94,6 +107,22 @@ export default function Grupos({ token, usuario }) {
     if (sinRed) return setError('No hay conexión con el servidor');
     if (!ok) return setError(datos?.error || 'No se pudo abrir el grupo');
 
+    setDetalle(datos);
+  }
+
+  // Vuelve a pedir los miembros sin borrar lo que ya se ve. Sirve para
+  // deslizar hacia abajo y al volver del mapa: mientras tanto alguien
+  // pudo empezar, pausar o terminar su ruta.
+  async function refrescarDetalle() {
+    if (!grupoAbierto) return;
+    setRefrescando(true);
+    const { ok, datos, sinRed } = await pedir(`/api/groups/${grupoAbierto.id}`, { token });
+    setRefrescando(false);
+
+    if (sinRed) return setError('No hay conexión con el servidor');
+    if (!ok) return setError(datos?.error || 'No se pudo actualizar el grupo');
+
+    setError('');
     setDetalle(datos);
   }
 
@@ -169,74 +198,97 @@ export default function Grupos({ token, usuario }) {
     );
   }
 
+  // ---------------- Ubicacion de un miembro ----------------
+
+  // El mapa ocupa toda la pantalla, como antes en Familia. Al volver se
+  // queda en la pestaña Miembros, que es de donde se vino.
+  if (vista === 'detalle' && rutaEnVivo) {
+    return (
+      <EnVivo
+        token={token}
+        ruta={rutaEnVivo}
+        onVolver={() => { setRutaEnVivo(null); refrescarDetalle(); }}
+      />
+    );
+  }
+
   // ---------------- Detalle de un grupo ----------------
 
   if (vista === 'detalle') {
+    const total = detalle ? detalle.total_miembros : Number(grupoAbierto?.total_miembros);
+
     return (
       <SafeAreaView style={g.pantalla}>
-        <ScrollView contentContainerStyle={e.contenido}>
-          <Pressable onPress={() => { setVista('lista'); setError(''); }}>
+        <View style={e.cabeceraDetalle}>
+          <Pressable onPress={() => { setVista('lista'); setError(''); }} hitSlop={10}>
             <Text style={e.volver}>‹ Grupos</Text>
           </Pressable>
 
+          <View>
+            <Text style={e.tituloDetalle} numberOfLines={1}>
+              {detalle?.grupo.name || grupoAbierto?.name}
+            </Text>
+            {Number.isFinite(total) && (
+              <Text style={g.subtexto}>
+                {total} {total === 1 ? 'persona' : 'personas'}
+              </Text>
+            )}
+          </View>
+
+          <View style={e.pestanas}>
+            <Pestana texto="Chat" activa={pestana === 'chat'} onPress={() => setPestana('chat')} />
+            <Pestana
+              texto="Miembros"
+              activa={pestana === 'miembros'}
+              onPress={() => setPestana('miembros')}
+            />
+          </View>
+        </View>
+
+        {pestana === 'chat' && grupoAbierto && (
+          <ChatGrupo token={token} usuario={usuario} grupoId={grupoAbierto.id} />
+        )}
+
+        {pestana === 'miembros' && (
+        <ScrollView
+          contentContainerStyle={e.contenido}
+          refreshControl={
+            <RefreshControl
+              refreshing={refrescando}
+              onRefresh={refrescarDetalle}
+              tintColor={C.acento}
+            />
+          }
+        >
           {error !== '' && <Text style={g.error}>{error}</Text>}
 
           {!detalle ? (
             <ActivityIndicator color={C.acento} />
           ) : (
             <>
-              <View>
-                <Text style={g.titulo}>{detalle.grupo.name}</Text>
-                <Text style={g.subtexto}>
-                  {detalle.total_miembros}{' '}
-                  {detalle.total_miembros === 1 ? 'persona' : 'personas'}
-                </Text>
-              </View>
-
-              <View style={e.tarjetaCodigo}>
-                <Text style={g.etiqueta}>CÓDIGO DE INVITACIÓN</Text>
-                <Text style={e.codigoGrande}>{detalle.grupo.invite_code}</Text>
-                <Text style={e.pista}>
-                  Quien escriba este código entra al grupo. Pásalo solo a quien
-                  quieras que vea tus rutas.
-                </Text>
-                {detalle.mi_rol === 'owner' && (
-                  <Pressable
-                    style={[g.botonSecundario, ocupado && g.opaco]}
-                    disabled={ocupado}
-                    onPress={renovarCodigo}
-                  >
-                    <Text style={g.textoSecundario}>Cambiar el código</Text>
-                  </Pressable>
-                )}
-              </View>
+              <CodigoInvitacion
+                key={detalle.grupo.id}
+                codigo={detalle.grupo.invite_code}
+                token={token}
+                esDueno={detalle.mi_rol === 'owner'}
+                ocupado={ocupado}
+                onRenovar={renovarCodigo}
+              />
 
               <View style={{ gap: 10 }}>
                 <Text style={g.etiqueta}>MIEMBROS</Text>
                 {detalle.miembros.map((m) => (
-                  <View key={m.id} style={e.miembro}>
-                    <View style={e.inicial}>
-                      <Text style={e.inicialTexto}>
-                        {(m.name || '?').charAt(0).toUpperCase()}
-                      </Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={e.nombre}>
-                        {m.name}{m.id === usuario.id ? ' (tú)' : ''}
-                      </Text>
-                      <Text style={e.correo}>{m.email}</Text>
-                    </View>
-                    {m.caminando_ahora && (
-                      <View style={e.chipVivo}>
-                        <View style={e.puntito} />
-                        <Text style={e.chipTexto}>EN RUTA</Text>
-                      </View>
-                    )}
-                    {m.role === 'owner' && !m.caminando_ahora && (
-                      <Text style={e.rol}>DUEÑO</Text>
-                    )}
-                  </View>
+                  <Miembro
+                    key={m.id}
+                    miembro={m}
+                    soyYo={m.id === usuario.id}
+                    onVerUbicacion={() => setRutaEnVivo(m.ruta)}
+                  />
                 ))}
+                <Text style={e.pista}>
+                  Toca a quien esté en ruta para ver dónde va. Solo aparecen las
+                  rutas que cada uno compartió con este grupo.
+                </Text>
               </View>
 
               {detalle.mi_rol !== 'owner' && (
@@ -251,6 +303,7 @@ export default function Grupos({ token, usuario }) {
             </>
           )}
         </ScrollView>
+        )}
       </SafeAreaView>
     );
   }
@@ -301,7 +354,6 @@ export default function Grupos({ token, usuario }) {
                   {gr.role === 'owner' ? ' · eres el dueño' : ''}
                 </Text>
               </View>
-              <Text style={e.codigoChico}>{gr.invite_code}</Text>
             </View>
           </Pressable>
         ))}
@@ -315,6 +367,206 @@ export default function Grupos({ token, usuario }) {
         </Pressable>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+/**
+ * Una fila de la lista de miembros.
+ *
+ * Si la persona tiene una ruta compartida con este grupo, la fila se
+ * puede tocar y abre su ubicacion en vivo. Si no, es solo informativa:
+ * no hay nada que mostrar, y una fila que se ve tocable pero no hace
+ * nada confunde. La propia ruta no se abre aqui: para eso esta la
+ * pestaña Ruta, que ademas la controla.
+ */
+function Miembro({ miembro: m, soyYo, onVerUbicacion }) {
+  const tocable = Boolean(m.ruta) && !soyYo;
+  const pausada = m.ruta?.status === 'paused';
+
+  return (
+    <Pressable
+      style={({ pressed }) => [e.miembro, tocable && e.miembroTocable, pressed && tocable && g.opaco]}
+      onPress={tocable ? onVerUbicacion : undefined}
+      disabled={!tocable}
+      accessibilityRole={tocable ? 'button' : undefined}
+      accessibilityLabel={tocable ? `Ver la ubicación de ${m.name}` : undefined}
+    >
+      <View style={e.inicial}>
+        <Text style={e.inicialTexto}>
+          {(m.name || '?').charAt(0).toUpperCase()}
+        </Text>
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={e.nombre}>
+          {m.name}{soyYo ? ' (tú)' : ''}
+        </Text>
+        <Text style={e.correo} numberOfLines={1}>
+          {m.ruta ? m.ruta.name : m.email}
+        </Text>
+      </View>
+      {/* Pausado y en marcha se ven distinto: un punto congelado con
+          "EN RUTA" haria creer que esa es la posicion actual. */}
+      {m.ruta && (pausada ? (
+        <View style={e.chipPausa}>
+          <View style={e.puntitoGris} />
+          <Text style={e.chipTextoPausa}>EN PAUSA</Text>
+        </View>
+      ) : (
+        <View style={e.chipVivo}>
+          <View style={e.puntito} />
+          <Text style={e.chipTexto}>EN RUTA</Text>
+        </View>
+      ))}
+      {m.role === 'owner' && !m.ruta && (
+        <Text style={e.rol}>DUEÑO</Text>
+      )}
+      {tocable && <Text style={e.flecha}>›</Text>}
+    </Pressable>
+  );
+}
+
+/**
+ * El codigo de invitacion, tapado hasta que se confirma la contraseña.
+ *
+ * Quien tiene el codigo entra al grupo y ve las rutas que se comparten
+ * en el. Con el telefono desbloqueado en la mano de otra persona (o
+ * alguien mirando por encima del hombro) bastaria abrir esta pantalla
+ * para llevarselo. Pedir la clave lo evita.
+ *
+ * La clave se revisa primero en el telefono, con la misma huella que
+ * usa el boton de emergencia: asi funciona aunque no haya datos. Si el
+ * telefono no tiene la huella (sesion de una version anterior), se le
+ * pregunta al servidor.
+ *
+ * Al salir del grupo el componente se desmonta y el codigo vuelve a
+ * quedar tapado.
+ */
+function CodigoInvitacion({ codigo, token, esDueno, ocupado, onRenovar }) {
+  const [visible, setVisible] = useState(false);
+  const [pidiendoClave, setPidiendoClave] = useState(false);
+  const [clave, setClave] = useState('');
+  const [verificando, setVerificando] = useState(false);
+  const [error, setError] = useState('');
+
+  function cancelar() {
+    setPidiendoClave(false);
+    setClave('');
+    setError('');
+  }
+
+  async function confirmar() {
+    if (!clave) return setError('Escribe tu contraseña');
+
+    setError('');
+    setVerificando(true);
+
+    let correcta = null;
+    try {
+      correcta = await verificarClaveLocal(clave);
+    } catch (e) { /* se pregunta al servidor */ }
+
+    if (correcta === null) {
+      const { ok, status, sinRed } = await pedir('/api/auth/verify-password', {
+        metodo: 'POST', token, cuerpo: { password: clave },
+      });
+      if (sinRed) {
+        setVerificando(false);
+        return setError('No hay conexión para comprobar la contraseña');
+      }
+      correcta = ok;
+      if (!ok && status !== 401) {
+        setVerificando(false);
+        return setError('No se pudo comprobar la contraseña');
+      }
+    }
+
+    setVerificando(false);
+    if (!correcta) return setError('Contraseña incorrecta');
+
+    setVisible(true);
+    cancelar();
+  }
+
+  return (
+    <View style={e.tarjetaCodigo}>
+      <Text style={g.etiqueta}>CÓDIGO DE INVITACIÓN</Text>
+
+      {visible ? (
+        <Pressable onPress={() => setVisible(false)} accessibilityLabel="Ocultar el código">
+          <Text style={e.codigoGrande} selectable>{codigo}</Text>
+          <Text style={e.pista}>Toca el código para volver a ocultarlo.</Text>
+        </Pressable>
+      ) : (
+        <Pressable
+          onPress={() => setPidiendoClave(true)}
+          disabled={pidiendoClave}
+          accessibilityLabel="Mostrar el código, pide tu contraseña"
+        >
+          <Text style={[e.codigoGrande, e.codigoTapado]}>
+            {'•'.repeat(codigo?.length || 6)}
+          </Text>
+          {!pidiendoClave && (
+            <Text style={e.pista}>Toca para verlo. Te pediremos tu contraseña.</Text>
+          )}
+        </Pressable>
+      )}
+
+      {pidiendoClave && !visible && (
+        <View style={{ gap: 10 }}>
+          <TextInput
+            style={g.input}
+            value={clave}
+            onChangeText={setClave}
+            placeholder="Tu contraseña"
+            placeholderTextColor={C.placeholder}
+            secureTextEntry
+            autoFocus
+            onSubmitEditing={confirmar}
+            returnKeyType="done"
+          />
+          {error !== '' && <Text style={g.error}>{error}</Text>}
+          <View style={e.filaBotones}>
+            <Pressable style={[g.botonSecundario, { flex: 1 }]} onPress={cancelar} disabled={verificando}>
+              <Text style={g.textoSecundario}>Cancelar</Text>
+            </Pressable>
+            <Pressable
+              style={[g.boton, { flex: 1, height: 50 }, verificando && g.opaco]}
+              onPress={confirmar}
+              disabled={verificando}
+            >
+              {verificando
+                ? <ActivityIndicator color={C.acentoTexto} />
+                : <Text style={g.textoBoton}>Mostrar</Text>}
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      <Text style={e.pista}>
+        Quien escriba este código entra al grupo. Pásalo solo a quien
+        quieras que vea tus rutas.
+      </Text>
+
+      {/* Cambiar el codigo solo con el codigo a la vista: asi el nuevo
+          tambien queda protegido por la misma contraseña. */}
+      {esDueno && visible && (
+        <Pressable
+          style={[g.botonSecundario, ocupado && g.opaco]}
+          disabled={ocupado}
+          onPress={onRenovar}
+        >
+          <Text style={g.textoSecundario}>Cambiar el código</Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function Pestana({ texto, activa, onPress }) {
+  return (
+    <Pressable style={activa ? e.pestanaActiva : e.pestana} onPress={onPress}>
+      <Text style={activa ? e.pestanaTextoActivo : e.pestanaTexto}>{texto}</Text>
+    </Pressable>
   );
 }
 
@@ -372,6 +624,23 @@ function Formulario({
 const e = StyleSheet.create({
   contenido: { padding: 24, paddingTop: 20, gap: 18 },
   volver: { color: C.acento, fontSize: 16, fontWeight: '500' },
+
+  cabeceraDetalle: {
+    paddingHorizontal: 24, paddingTop: 20, paddingBottom: 12, gap: 14,
+    borderBottomWidth: 1, borderBottomColor: C.bordeSuave,
+  },
+  tituloDetalle: { color: C.texto, fontSize: 24, fontWeight: '700' },
+  pestanas: {
+    flexDirection: 'row', padding: 4, borderRadius: 12,
+    backgroundColor: C.superficie, borderWidth: 1, borderColor: C.borde,
+  },
+  pestana: { flex: 1, height: 38, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
+  pestanaActiva: {
+    flex: 1, height: 38, borderRadius: 9, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(233,164,74,0.16)',
+  },
+  pestanaTexto: { color: C.apagado, fontSize: 15, fontWeight: '500' },
+  pestanaTextoActivo: { color: C.acento, fontSize: 15, fontWeight: '600' },
   pista: { color: C.tenue, fontSize: 13, lineHeight: 19 },
 
   tarjetaGrupo: {
@@ -381,9 +650,6 @@ const e = StyleSheet.create({
   nombre: { color: C.texto, fontSize: 18, fontWeight: '600' },
   correo: { color: C.tenue, fontSize: 13 },
 
-  codigoChico: {
-    color: C.acento, fontSize: 15, fontWeight: '700', letterSpacing: 1.5,
-  },
   tarjetaCodigo: {
     borderWidth: 1, borderColor: '#4A3A1E', backgroundColor: '#15140F',
     borderRadius: 14, padding: 18, gap: 12,
@@ -392,6 +658,8 @@ const e = StyleSheet.create({
     color: C.acento, fontSize: 34, fontWeight: '700', letterSpacing: 6,
   },
   inputCodigo: { fontSize: 22, fontWeight: '700', letterSpacing: 4 },
+  codigoTapado: { color: C.tenue },
+  filaBotones: { flexDirection: 'row', gap: 10 },
 
   miembro: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
@@ -413,4 +681,13 @@ const e = StyleSheet.create({
   },
   puntito: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.acento },
   chipTexto: { color: C.acento, fontSize: 10, fontWeight: '700', letterSpacing: 0.7 },
+  chipPausa: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(139,149,143,0.14)',
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+  },
+  puntitoGris: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.apagado },
+  chipTextoPausa: { color: C.apagado, fontSize: 10, fontWeight: '700', letterSpacing: 0.7 },
+  miembroTocable: { borderColor: '#4A3A1E', backgroundColor: '#15140F' },
+  flecha: { color: C.acento, fontSize: 24, fontWeight: '300', marginLeft: -2 },
 });

@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const CLAVE = 'hikingtrail_cola';
+const CLAVE = 'geotrail_cola';
 const TAMANO_LOTE = 100;
 
 // Estado del modulo: hay una sola cola en toda la app.

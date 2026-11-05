@@ -4,6 +4,7 @@ import {
   ActivityIndicator, SafeAreaView,
 } from 'react-native';
 import * as Location from 'expo-location';
+import * as Battery from 'expo-battery';
 import MapView, { Polyline, Marker } from 'react-native-maps';
 import { pedir } from '../api';
 import { API } from '../config';
@@ -27,6 +28,13 @@ import {
 // persona se movio de verdad.
 const METROS_PARA_REANUDAR = 60;
 
+// Cada cuanto se le cuenta al servidor como esta el telefono
+// (ubicacion activada, bateria). Llega aunque la persona este quieta:
+// es lo que le permite al servidor distinguir "no se mueve" de "su
+// telefono desaparecio". Si pasan 5 minutos sin noticias, avisa al
+// grupo.
+const REPORTE_ESTADO_MS = 60 * 1000;
+
 /**
  * Distancia en metros entre dos coordenadas (formula de Haversine).
  *
@@ -46,16 +54,20 @@ function distanciaMetros(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
+export default function Montanista({ token, usuario, visible = true, onCambioRuta }) {
   const [ruta, setRuta] = useState(null);
   const [ubicacion, setUbicacion] = useState(null);
   const [puntos, setPuntos] = useState([]);
   const [enviados, setEnviados] = useState(0);
   const [pendientes, setPendientes] = useState(0);
   const [sinSenal, setSinSenal] = useState(false);
+  const [ubicacionApagada, setUbicacionApagada] = useState(false);
 
   // Lo ultimo que dijo el servidor sobre el desvio: { fuera_de_ruta, desvio_m }
   const [desvio, setDesvio] = useState(null);
+  // Texto del aviso "te trazamos un camino nuevo", o null. Se muestra
+  // unos segundos y se va solo.
+  const [avisoNuevoCamino, setAvisoNuevoCamino] = useState(null);
   const [estadisticas, setEstadisticas] = useState(null);
   const [mensaje, setMensaje] = useState('');
 
@@ -117,6 +129,7 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   useEffect(() => {
     cargarCola().then(setPendientes);
     revisarPermiso();
+    retomarRutaActiva();
     return () => { soltarGPS(); soltarVigilancia(); };
   }, []);
 
@@ -128,12 +141,14 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
   // Grupos y lugares se recargan cada vez que se vuelve a la pantalla
   // de inicio, no solo al abrir la app: si el usuario acaba de crear un
   // grupo en la otra pestana, tiene que aparecer aca sin reiniciar.
+  // Esta pantalla ya no se desmonta al cambiar de pestana (App.js solo
+  // la oculta), asi que "volver a ella" se detecta con `visible`.
   useEffect(() => {
-    if (!ruta) {
+    if (!ruta && visible) {
       cargarGrupos();
       cargarLugares();
     }
-  }, [ruta]);
+  }, [ruta, visible]);
 
   // ---------------- Permiso y posicion ----------------
 
@@ -421,7 +436,25 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     // conserva el ultimo estado conocido en vez de borrarlo: quedarse
     // sin aviso por un problema de red seria lo peor que podria pasar.
     if (resultado.desvio) setDesvio(resultado.desvio);
+
+    // Se alejo mas de 100 m y el servidor le trazo un camino nuevo
+    // desde donde esta, hacia el mismo destino. Se reemplaza la linea
+    // del mapa; los puntos, la distancia y el tiempo siguen igual,
+    // porque es la misma ruta.
+    if (resultado.desvio?.recalculado && resultado.desvio.camino?.length > 1) {
+      setCaminoPlan(resultado.desvio.camino);
+      setAvisoNuevoCamino(
+        `Te alejaste ${resultado.desvio.desvio_m} m del camino. Te trazamos uno nuevo ` +
+        `desde aquí (${resultado.desvio.distancia_texto}). Tu grupo recibió un aviso.`
+      );
+    }
   }
+
+  useEffect(() => {
+    if (!avisoNuevoCamino) return;
+    const t = setTimeout(() => setAvisoNuevoCamino(null), 12000);
+    return () => clearTimeout(t);
+  }, [avisoNuevoCamino]);
 
   // Reintento periodico mientras haya ruta activa
   useEffect(() => {
@@ -429,6 +462,51 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     const temporizador = setInterval(intentarEnviar, 15000);
     return () => clearInterval(temporizador);
   }, [ruta]);
+
+  // Reporte de estado mientras haya ruta, pausada o no. En pausa
+  // tambien importa: una bateria que se agota o una ubicacion apagada
+  // son noticia aunque la persona este detenida a proposito.
+  useEffect(() => {
+    if (!ruta) return;
+    reportarEstado();
+    const temporizador = setInterval(reportarEstado, REPORTE_ESTADO_MS);
+    return () => clearInterval(temporizador);
+  }, [ruta]);
+
+  /**
+   * Le cuenta al servidor como esta el telefono. El servidor decide si
+   * eso amerita un aviso en el chat del grupo; la app solo informa.
+   *
+   * Nunca lanza error: si algo falla (sin red, sin sensor de bateria),
+   * se intenta de nuevo en el proximo minuto.
+   */
+  async function reportarEstado() {
+    const rutaId = rutaRef.current;
+    if (!rutaId) return;
+
+    let ubicacionActiva = null;
+    try {
+      ubicacionActiva = await Location.hasServicesEnabledAsync();
+      setUbicacionApagada(!ubicacionActiva);
+    } catch (e) { /* sin dato: el servidor no cambia nada */ }
+
+    let bateria = null;
+    let cargando = false;
+    try {
+      const energia = await Battery.getPowerStateAsync();
+      // -1 = el sistema no sabe (emuladores). Mejor no mandar nada
+      // que mandar un 0% inventado y disparar un aviso falso.
+      if (energia.batteryLevel >= 0) bateria = energia.batteryLevel;
+      cargando = energia.batteryState === Battery.BatteryState.CHARGING ||
+                 energia.batteryState === Battery.BatteryState.FULL;
+    } catch (e) { /* sin dato */ }
+
+    await pedir(`/api/routes/${rutaId}/status`, {
+      metodo: 'POST',
+      token: tokenRef.current,
+      cuerpo: { ubicacion_activa: ubicacionActiva, bateria, cargando },
+    });
+  }
 
   // Cronometro de la parada: se recalcula desde la hora de inicio,
   // no sumando de a uno, asi no se desfasa si el celular se duerme.
@@ -515,6 +593,76 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
     await empezarRuta();
   }
 
+  /**
+   * Al abrir la app: si quedo una ruta en curso, se retoma tal cual.
+   *
+   * Pasa cuando la persona cierra la app, el sistema la mata para
+   * liberar memoria o el telefono se reinicia. Sin esto, la ruta seguia
+   * abierta en el servidor (el grupo la veia "en ruta") pero aqui se
+   * volvia a la pantalla de inicio, sin GPS: el peor de los dos mundos.
+   *
+   * Se recupera todo desde el servidor: los puntos ya enviados (la
+   * linea recorrida), el camino sugerido, el destino y si estaba en
+   * pausa. Los puntos que no alcanzaron a subir siguen en la cola del
+   * disco y se envian solos, porque la cola ya conoce esta ruta.
+   */
+  async function retomarRutaActiva() {
+    const activa = await pedir('/api/routes/active', { token });
+    if (!activa.ok || !activa.datos?.route_id) return;
+
+    const { ok, datos } = await pedir(`/api/routes/${activa.datos.route_id}`, { token });
+    if (!ok || !datos?.ruta?.is_active) return;
+
+    // Si mientras tanto la persona ya empezo otra cosa, no se pisa.
+    if (rutaRef.current) return;
+
+    const recorridos = (datos.puntos || []).map((p) => ({
+      latitude: Number(p.lat),
+      longitude: Number(p.lon),
+    }));
+
+    rutaRef.current = datos.ruta.id;
+    setPuntos(recorridos);
+    setEnviados(recorridos.length);
+    setCaminoPlan(datos.camino || null);
+    setDestino(datos.destino || null);
+    if (datos.plan) {
+      setInfoPlan({ distancia: datos.plan.distancia_texto, duracion: datos.plan.duracion_texto });
+    }
+    setDesvio(null);
+    setEstadisticas(null);
+    setParadas((datos.paradas || []).filter((p) => p.end_time).length);
+
+    // El mapa de la ruta se dibuja recien cuando hay `ubicacion`. Con la
+    // ultima posicion conocida aparece al tiro, sin esperar al GPS (y en
+    // pausa, que no hay GPS de alta precision, es la unica que habra).
+    const ultimo = recorridos[recorridos.length - 1];
+    if (ultimo) setUbicacion(ultimo);
+
+    setRuta(datos.ruta);
+
+    const { status } = await Location.getForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      setMensaje('Tu ruta sigue en curso, pero necesito permiso de ubicación para seguir trazándola.');
+      return;
+    }
+
+    if (datos.ruta.status === 'paused') {
+      // La parada abierta dice desde cuando esta en pausa.
+      const abierta = (datos.paradas || []).find((p) => !p.end_time);
+      setPausada(true);
+      setPausadaDesde(abierta ? new Date(abierta.start_time).getTime() : Date.now());
+      if (ultimo) {
+        anclaPausa.current = ultimo;
+        await vigilarMovimiento();
+      }
+      setMensaje('Retomamos tu ruta. Sigue en pausa.');
+    } else {
+      await escucharGPS();
+      setMensaje('Retomamos tu ruta donde la dejaste.');
+    }
+  }
+
   async function pausar() {
     setMensaje('');
     await intentarEnviar();
@@ -593,6 +741,7 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
 
     rutaRef.current = null;
     setRuta(null);
+    setUbicacionApagada(false);
     setPausada(false);
     setPausadaDesde(null);
 
@@ -646,13 +795,13 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
           >
             {/* El camino sugerido va PRIMERO para que quede debajo:
                 en react-native-maps lo que se declara despues se
-                dibuja encima. La linea real tiene que tapar al plan,
-                no al reves. */}
+                dibuja encima. Lo recorrido, apagado, tapa el tramo del
+                plan que ya se camino; lo que falta queda brillante. */}
             {caminoPlan && caminoPlan.length > 1 && (
               <Polyline
                 coordinates={caminoPlan}
-                strokeColor={C.apagado}
-                strokeWidth={7}
+                strokeColor={C.ruta}
+                strokeWidth={6}
                 lineCap="round"
                 lineJoin="round"
               />
@@ -661,8 +810,8 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
             {puntos.length > 1 && (
               <Polyline
                 coordinates={puntos}
-                strokeColor={C.acento}
-                strokeWidth={5}
+                strokeColor={C.rutaRecorrida}
+                strokeWidth={7}
                 lineCap="round"
                 lineJoin="round"
               />
@@ -703,6 +852,13 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
               </Text>
             </View>
           )}
+
+          {avisoNuevoCamino && !pausada && (
+            <Pressable style={e.cajaNuevoCamino} onPress={() => setAvisoNuevoCamino(null)}>
+              <Text style={e.tituloNuevoCamino}>NUEVO CAMINO</Text>
+              <Text style={e.textoNuevoCamino}>{avisoNuevoCamino}</Text>
+            </Pressable>
+          )}
         </SafeAreaView>
 
         <View style={e.panel}>
@@ -729,6 +885,15 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
               <Text style={e.textoSinSenal}>
                 Sin señal · {pendientes} punto{pendientes === 1 ? '' : 's'} guardado
                 {pendientes === 1 ? '' : 's'} en el teléfono
+              </Text>
+            </View>
+          )}
+
+          {ubicacionApagada && (
+            <View style={e.avisoSinSenal}>
+              <Text style={e.textoSinSenal}>
+                La ubicación del teléfono está desactivada.
+                {ruta.group_id ? ' Tu grupo fue avisado.' : ''} Actívala para seguir compartiendo tu ruta.
               </Text>
             </View>
           )}
@@ -786,7 +951,7 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
           {caminoPlan && caminoPlan.length > 1 && (
             <Polyline
               coordinates={caminoPlan}
-              strokeColor={C.acento}
+              strokeColor={C.ruta}
               strokeWidth={6}
               lineCap="round"
               lineJoin="round"
@@ -1013,10 +1178,6 @@ export default function Montanista({ token, usuario, onSalir, onCambioRuta }) {
               </View>
             )}
           </View>
-
-          <Pressable style={g.botonSecundario} onPress={onSalir}>
-            <Text style={g.textoSecundario}>Cerrar sesión</Text>
-          </Pressable>
         </ScrollView>
         )}
 
@@ -1088,12 +1249,21 @@ const e = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, marginTop: 8,
   },
   chipTextoDesvio: { color: C.alertaTexto, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  // Amarillo, como el aviso que le llega al grupo: es informacion, no
+  // una alarma.
+  cajaNuevoCamino: {
+    backgroundColor: 'rgba(30,26,16,0.96)', borderWidth: 1, borderColor: C.acento,
+    borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10,
+    marginTop: 8, marginHorizontal: 16, gap: 4, maxWidth: 420,
+  },
+  tituloNuevoCamino: { color: C.acento, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  textoNuevoCamino: { color: C.texto, fontSize: 14, lineHeight: 19 },
 
   panel: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
     backgroundColor: C.panel, borderTopWidth: 1, borderTopColor: C.borde,
     borderTopLeftRadius: 20, borderTopRightRadius: 20,
-    padding: 20, paddingBottom: 34, gap: 16,
+    padding: 20, gap: 16,
   },
   // Abierto se limita al 72% de la pantalla: por debajo de eso el mapa
   // dejaria de verse, y el mapa es justamente el punto.

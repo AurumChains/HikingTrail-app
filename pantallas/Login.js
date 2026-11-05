@@ -3,17 +3,16 @@ import {
   View, Text, TextInput, Pressable, StyleSheet,
   ActivityIndicator, KeyboardAvoidingView, Platform, SafeAreaView,
 } from 'react-native';
-import * as SecureStore from 'expo-secure-store';
 import { pedir } from '../api';
-import { CLAVE_TOKEN } from '../config';
 import { C, g } from '../estilos';
 
 /**
  * Pantalla de entrada.
- * Cuando el login sale bien avisa hacia arriba con onEntrar(usuario, token).
- * No decide que pasa despues: eso lo maneja App.js.
+ * Cuando el login sale bien avisa hacia arriba con
+ * onEntrar(usuario, token, password). No decide que pasa despues ni
+ * guarda la sesion: eso lo maneja App.js, igual que para el registro.
  */
-export default function Login({ onEntrar }) {
+export default function Login({ onEntrar, onIrARegistro }) {
   const [correo, setCorreo] = useState('test@example.com');
   const [password, setPassword] = useState('123456');
   const [cargando, setCargando] = useState(false);
@@ -28,14 +27,10 @@ export default function Login({ onEntrar }) {
       cuerpo: { email: correo.trim(), password },
     });
 
-    setCargando(false);
+    if (sinRed) { setCargando(false); return setError('No hay conexión con el servidor'); }
+    if (!ok) { setCargando(false); return setError(datos?.error || 'No se pudo entrar'); }
 
-    if (sinRed) return setError('No hay conexión con el servidor');
-    if (!ok) return setError(datos?.error || 'No se pudo entrar');
-
-    // El token va al almacen cifrado del telefono, no a un archivo suelto.
-    await SecureStore.setItemAsync(CLAVE_TOKEN, datos.token);
-    onEntrar(datos.user, datos.token);
+    await onEntrar(datos.user, datos.token, password);
   }
 
   return (
@@ -89,6 +84,12 @@ export default function Login({ onEntrar }) {
               ? <ActivityIndicator color={C.acentoTexto} />
               : <Text style={g.textoBoton}>Entrar</Text>}
           </Pressable>
+
+          <Pressable style={e.enlace} onPress={onIrARegistro} disabled={cargando} hitSlop={8}>
+            <Text style={e.enlaceTexto}>
+              ¿No tienes cuenta? <Text style={e.enlaceAcento}>Crear una</Text>
+            </Text>
+          </Pressable>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -101,4 +102,7 @@ const e = StyleSheet.create({
   marca: { color: C.texto, fontSize: 38, fontWeight: '700', marginBottom: 10 },
   lema: { color: C.apagado, fontSize: 16, lineHeight: 24 },
   formulario: { gap: 16 },
+  enlace: { alignItems: 'center', paddingVertical: 8 },
+  enlaceTexto: { color: C.apagado, fontSize: 15 },
+  enlaceAcento: { color: C.acento, fontWeight: '600' },
 });

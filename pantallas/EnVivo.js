@@ -28,6 +28,11 @@ export default function EnVivo({ token, ruta, onVolver }) {
   const [ultimaSenal, setUltimaSenal] = useState(null);
   const [segundosSinSenal, setSegundosSinSenal] = useState(0);
   const [estado, setEstado] = useState(ruta.status || 'in_progress');
+  // A donde va y por donde deberia ir. Es lo que le permite a quien
+  // mira darse cuenta de que algo anda mal: sin esto solo veria un
+  // punto moviendose, sin saber si va bien o perdido.
+  const [caminoPlan, setCaminoPlan] = useState(null);
+  const [destino, setDestino] = useState(null);
 
   // El ultimo aviso que empujo el servidor: desvio, vuelta al camino,
   // y mas adelante tambien detencion prolongada.
@@ -75,6 +80,10 @@ export default function EnVivo({ token, ruta, onVolver }) {
     setError('');
     setEstadisticas(datos.estadisticas);
     if (datos.ruta?.status) setEstado(datos.ruta.status);
+    // Se pisa en cada recarga: si se desvio y el servidor le trazo un
+    // camino nuevo, aqui llega el nuevo.
+    setCaminoPlan(datos.camino || null);
+    setDestino(datos.destino || null);
 
     const coords = (datos.puntos || []).map((p) => ({
       latitude: Number(p.lat),
@@ -131,6 +140,11 @@ export default function EnVivo({ token, ruta, onVolver }) {
     socket.on('alerta', (a) => {
       setAviso(a);
 
+      // Se desvio y se le trazo un camino nuevo: se trae al tiro, sin
+      // esperar la recarga de cada 30 s, para que quien mira vea por
+      // donde va a ir ahora.
+      if (a.tipo === 'off_route' && a.recalculado) cargarRuta();
+
       // Volver al camino no deja un cartel rojo colgado para siempre:
       // se muestra un momento y se va solo.
       if (a.tipo === 'back_on_route') {
@@ -163,6 +177,9 @@ export default function EnVivo({ token, ruta, onVolver }) {
   // una app de seguridad.
   const alerta = !pausada && segundosSinSenal > 300;
   const posicionActual = puntos[puntos.length - 1];
+  // Sin puntos todavia (recien salio) igual hay algo que mostrar si hay
+  // camino sugerido: de donde parte y a donde va.
+  const centro = posicionActual || caminoPlan?.[0] || null;
 
   if (cargando) {
     return (
@@ -175,33 +192,57 @@ export default function EnVivo({ token, ruta, onVolver }) {
 
   return (
     <View style={g.pantalla}>
-      {posicionActual ? (
+      {centro ? (
         <MapView
           ref={mapaRef}
           style={StyleSheet.absoluteFill}
           mapType="hybrid"
           userInterfaceStyle="dark"
           initialRegion={{
-            latitude: posicionActual.latitude,
-            longitude: posicionActual.longitude,
+            latitude: centro.latitude,
+            longitude: centro.longitude,
             latitudeDelta: 0.006,
             longitudeDelta: 0.006,
           }}
         >
-          {puntos.length > 1 && (
+          {/* Mismo orden y colores que ve quien camina: el camino
+              sugerido brillante debajo, y encima lo ya recorrido en
+              verde apagado. Lo que falta por andar es lo que resalta. */}
+          {caminoPlan && caminoPlan.length > 1 && (
             <Polyline
-              coordinates={puntos}
-              strokeColor={C.acento}
-              strokeWidth={5}
+              coordinates={caminoPlan}
+              strokeColor={C.ruta}
+              strokeWidth={6}
               lineCap="round"
               lineJoin="round"
             />
           )}
 
-          <Marker coordinate={puntos[0]} title="Inicio" pinColor={C.acento} />
+          {puntos.length > 1 && (
+            <Polyline
+              coordinates={puntos}
+              strokeColor={C.rutaRecorrida}
+              strokeWidth={7}
+              lineCap="round"
+              lineJoin="round"
+            />
+          )}
+
+          {puntos.length > 0 && (
+            <Marker coordinate={puntos[0]} title="Inicio" pinColor={C.acento} />
+          )}
+
+          {destino && (
+            <Marker
+              coordinate={{ latitude: destino.lat, longitude: destino.lon }}
+              title={destino.name || 'Destino'}
+              description="Destino"
+              pinColor="green"
+            />
+          )}
 
           {/* Cuando se pierde la senal, el circulo de busqueda de 100 m */}
-          {alerta && (
+          {alerta && posicionActual && (
             <Circle
               center={posicionActual}
               radius={100}
@@ -211,12 +252,14 @@ export default function EnVivo({ token, ruta, onVolver }) {
             />
           )}
 
-          <Marker
-            coordinate={posicionActual}
-            title={ruta.montanista}
-            description={formatoEspera(segundosSinSenal)}
-            pinColor={alerta ? C.alerta : C.acento}
-          />
+          {posicionActual && (
+            <Marker
+              coordinate={posicionActual}
+              title={ruta.montanista}
+              description={formatoEspera(segundosSinSenal)}
+              pinColor={alerta ? C.alerta : C.acento}
+            />
+          )}
         </MapView>
       ) : (
         <View style={g.centrado}>
@@ -255,8 +298,10 @@ export default function EnVivo({ token, ruta, onVolver }) {
               {ruta.montanista} se salió del camino
             </Text>
             <Text style={e.desvioTexto}>
-              {aviso.mensaje}. La línea gris es el camino previsto y la
-              naranja por donde va realmente.
+              {aviso.mensaje}.{' '}
+              {aviso.recalculado
+                ? 'La app le trazó un camino nuevo desde donde está, hacia el mismo destino.'
+                : 'No se pudo trazar un camino nuevo: sigue con el anterior.'}
             </Text>
           </View>
         )}
@@ -356,12 +401,15 @@ const e = StyleSheet.create({
   },
   puntoGris: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.apagado },
   chipTextoPausa: { color: C.apagado, fontSize: 10, fontWeight: '700', letterSpacing: 0.7 },
+  // Amarillo, igual que el aviso del chat: salirse del camino casi
+  // siempre es voluntario y ya tiene un camino nuevo. El rojo queda
+  // para lo que de verdad es alarma (sin señal).
   desvioCaja: {
-    backgroundColor: C.alertaFondo, borderWidth: 1, borderColor: C.bordeRojo,
+    backgroundColor: '#1E1A10', borderWidth: 1, borderColor: C.acento,
     borderRadius: 12, padding: 14, gap: 6,
   },
-  desvioTitulo: { color: C.alertaTexto, fontSize: 15, fontWeight: '700' },
-  desvioTexto: { color: '#B58A88', fontSize: 13, lineHeight: 19 },
+  desvioTitulo: { color: C.acento, fontSize: 15, fontWeight: '700' },
+  desvioTexto: { color: C.apagado, fontSize: 13, lineHeight: 19 },
   vueltaCaja: {
     backgroundColor: 'rgba(233,164,74,0.12)', borderWidth: 1, borderColor: '#4A3A1E',
     borderRadius: 12, padding: 12,
