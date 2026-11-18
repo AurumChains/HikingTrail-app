@@ -1,19 +1,22 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
+import * as Cellular from 'expo-cellular';
 
 /**
- * Todo lo que necesita la alerta de emergencia para funcionar SIN
- * DATOS MOVILES, que es justamente cuando mas se necesita.
+ * Lo que la app guarda en el telefono para funcionar SIN DATOS
+ * MOVILES, que es justamente cuando mas se necesita.
  *
- * Sin conexion la app no puede preguntarle nada al servidor: ni a
- * quien avisar, ni si la contrasena es correcta. Por eso las dos
- * cosas se guardan en el telefono de antemano:
+ * Sin conexion la app no puede preguntarle nada al servidor. Por eso
+ * se guardan de antemano:
  *
- *   - La lista de contactos (nombre y numero), copiada cada vez que
- *     se carga o se cambia en Ajustes.
+ *   - La lista de contactos de emergencia (nombre y numero), copiada
+ *     cada vez que se carga o se cambia en Ajustes. Es lo unico que
+ *     necesita la alerta: ya no pide contrasena (ver ConfirmarAlerta en
+ *     pantallas/Ajustes.js).
  *   - Una HUELLA de la contrasena, calculada al iniciar sesion. Nunca
- *     la contrasena misma.
+ *     la contrasena misma. La usa el codigo de invitacion de los grupos
+ *     (pantallas/Grupos.js), que se destapa con la clave.
  *
  * El SMS lo manda la app de mensajes del telefono, y si no hay red
  * terrestre pero si cobertura satelital (Entel + Starlink), sale por
@@ -80,6 +83,46 @@ export async function leerContactosLocal() {
 export async function borrarDatosEmergencia() {
   await AsyncStorage.removeItem(CLAVE_CONTACTOS);
   await SecureStore.deleteItemAsync(CLAVE_HUELLA);
+}
+
+// ---------------- SMS por satelite ----------------
+
+// Entel Chile: pais 730, red 01 o 10. Es la compañia chilena que ofrece
+// SMS por satelite (Starlink) en telefonos compatibles.
+const PAIS_CHILE = '730';
+const REDES_ENTEL = ['01', '10'];
+
+/**
+ * ¿La alerta podria salir por satelite si no hay señal?
+ *
+ * Mira la compañia del chip. Devuelve:
+ *   'entel'        tiene Entel
+ *   'otra'         tiene otra compañia (la alerta depende de la señal)
+ *   'desconocida'  no se pudo saber: en iPhone el sistema no le dice a
+ *                  ninguna app cual es la compañia, y en Android pasa
+ *                  sin chip o en modo avion
+ *
+ * Solo sabe la compañia, no el modelo del telefono: con Entel, el SMS
+ * por satelite funciona solo en los modelos que Entel habilita. Por eso
+ * el texto de Ajustes dice "si tu telefono es compatible".
+ *
+ * Nunca lanza: si algo falla, 'desconocida'.
+ */
+export async function estadoSatelital() {
+  try {
+    const [pais, red, nombre] = await Promise.all([
+      Cellular.getMobileCountryCodeAsync(),
+      Cellular.getMobileNetworkCodeAsync(),
+      Cellular.getCarrierNameAsync(),
+    ]);
+
+    if (pais === PAIS_CHILE && REDES_ENTEL.includes(red)) return 'entel';
+    if (nombre && /entel/i.test(nombre)) return 'entel';
+    if (pais || red || nombre) return 'otra';
+    return 'desconocida';
+  } catch (e) {
+    return 'desconocida';
+  }
 }
 
 // ---------------- El mensaje ----------------

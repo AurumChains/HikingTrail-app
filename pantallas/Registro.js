@@ -4,11 +4,8 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, SafeAreaView,
 } from 'react-native';
 import { pedir } from '../api';
+import { LARGO_MINIMO_CLAVE } from '../config';
 import { C, g } from '../estilos';
-
-// El backend exige lo mismo (authController.register). Revisarlo aqui
-// solo evita el viaje al servidor para un error que ya se sabe.
-const LARGO_MINIMO_CLAVE = 6;
 
 /**
  * Crear cuenta. Misma forma que el login, con dos campos mas.
@@ -137,8 +134,8 @@ export default function Registro({ onEntrar, onVolver }) {
             </View>
 
             <Text style={e.pista}>
-              Esta contraseña también confirma el botón de emergencia, aunque
-              no tengas datos. Elige una que recuerdes.
+              Esta contraseña también muestra el código de invitación de tus
+              grupos, aunque no tengas datos. Elige una que recuerdes.
             </Text>
 
             {error !== '' && <Text style={g.error}>{error}</Text>}

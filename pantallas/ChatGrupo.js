@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TextInput, Pressable, StyleSheet, FlatList, Image, Modal,
-  ActivityIndicator, KeyboardAvoidingView, Platform,
+  ActivityIndicator, KeyboardAvoidingView, Platform, Linking, SafeAreaView,
 } from 'react-native';
+import MapView, { Marker } from 'react-native-maps';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import * as ImagePicker from 'expo-image-picker';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { io } from 'socket.io-client';
@@ -96,7 +98,7 @@ function FotoChat({ url, token, style, resizeMode, onPress }) {
  * eso `mensajes` se guarda del mas nuevo al mas viejo, en el mismo
  * orden en que los entrega el backend.
  */
-export default function ChatGrupo({ token, usuario, grupoId }) {
+export default function ChatGrupo({ token, usuario, grupoId, onVerPunto }) {
   const [mensajes, setMensajes] = useState([]);
   const [cargando, setCargando] = useState(true);
   const [cargandoMas, setCargandoMas] = useState(false);
@@ -108,6 +110,8 @@ export default function ChatGrupo({ token, usuario, grupoId }) {
   const [preparandoFoto, setPreparandoFoto] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [fotoAbierta, setFotoAbierta] = useState(null);
+  // El aviso cuyo punto se abrio en el mapa grande, o null.
+  const [mapaAbierto, setMapaAbierto] = useState(null);
 
   const socketRef = useRef(null);
 
@@ -287,7 +291,17 @@ export default function ChatGrupo({ token, usuario, grupoId }) {
   }
 
   function renderMensaje({ item: m, index }) {
-    if (m.tipo === 'alerta') return <Aviso mensaje={m} />;
+    if (m.tipo === 'alerta') return <Aviso mensaje={m} onVerMapa={setMapaAbierto} />;
+    if (m.tipo === 'punto') {
+      return (
+        <PuntoMensaje
+          mensaje={m}
+          token={token}
+          onVerMapa={setMapaAbierto}
+          onVerPunto={onVerPunto}
+        />
+      );
+    }
 
     const mio = m.user_id === usuario.id;
 
@@ -297,7 +311,7 @@ export default function ChatGrupo({ token, usuario, grupoId }) {
     // medio corta la seguidilla, asi que despues se repite el nombre.
     const anterior = mensajes[index + 1];
     const mostrarAutor = !mio &&
-      (!anterior || anterior.tipo === 'alerta' || anterior.user_id !== m.user_id);
+      (!anterior || anterior.tipo !== 'usuario' || anterior.user_id !== m.user_id);
 
     const alto = m.imagen?.width && m.imagen?.height
       ? Math.round((ANCHO_FOTO * m.imagen.height) / m.imagen.width)
@@ -442,12 +456,24 @@ export default function ChatGrupo({ token, usuario, grupoId }) {
           )}
         </Pressable>
       </Modal>
+
+      {/* El punto de un aviso en un mapa que se puede mover. */}
+      <Modal
+        visible={Boolean(mapaAbierto)}
+        animationType="slide"
+        onRequestClose={() => setMapaAbierto(null)}
+      >
+        {mapaAbierto && (
+          <MapaAviso aviso={mapaAbierto} onCerrar={() => setMapaAbierto(null)} />
+        )}
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
 
 // Titulo corto de cada aviso. El detalle viene en el texto que arma
-// el servidor; esto es lo que se lee de un vistazo.
+// el servidor; esto es lo que se lee de un vistazo. La lista completa,
+// con su color, se explica en Ajustes.
 const TITULOS_AVISO = {
   location_off: 'Ubicación desactivada',
   location_on: 'Ubicación reactivada',
@@ -455,24 +481,197 @@ const TITULOS_AVISO = {
   reports_back: 'El teléfono volvió a reportar',
   battery_low: 'Batería baja',
   off_route: 'Desvío del camino',
+  mode_change: 'Cambio de transporte',
+  arrived: 'Llegó a su destino',
+  trip_cancelled: 'Viaje cancelado',
+  route_finished: 'Ruta terminada',
+};
+
+// Colores por nivel. Un nivel desconocido (de una version futura del
+// servidor) se pinta amarillo: mejor llamar la atencion que esconderlo.
+const NIVELES = {
+  rojo: { caja: 'avisoRojo', titulo: 'avisoTituloRojo', texto: 'avisoTextoRojo', icono: '⚠' },
+  amarillo: { caja: 'avisoAmarillo', titulo: 'avisoTituloAmarillo', texto: 'avisoTextoAmarillo', icono: '⚠' },
+  verde: { caja: 'avisoVerde', titulo: 'avisoTituloVerde', texto: 'avisoTextoVerde', icono: '✓' },
 };
 
 /**
- * Aviso automatico de seguridad. No es una burbuja: va centrado y a
- * todo el ancho, en rojo o amarillo, para que nunca se confunda con
- * algo que escribio una persona.
+ * Aviso automatico. No es una burbuja: va centrado y a todo el ancho,
+ * en rojo, amarillo o verde, para que nunca se confunda con algo que
+ * escribio una persona.
+ *
+ * Si el aviso trae un punto (viaje cancelado, llegada), muestra un mapa
+ * chico con el lugar. Tocarlo lo abre en grande.
  */
-function Aviso({ mensaje }) {
-  const rojo = mensaje.alerta?.nivel === 'rojo';
+function Aviso({ mensaje, onVerMapa }) {
+  const nivel = NIVELES[mensaje.alerta?.nivel] || NIVELES.amarillo;
   const titulo = TITULOS_AVISO[mensaje.alerta?.tipo] || 'Aviso de seguridad';
+  const punto = mensaje.alerta?.ubicacion;
 
   return (
-    <View style={[e.aviso, rojo ? e.avisoRojo : e.avisoAmarillo]}>
-      <Text style={[e.avisoTitulo, rojo ? e.avisoTituloRojo : e.avisoTituloAmarillo]}>
-        ⚠ {titulo.toUpperCase()}
+    <View style={[e.aviso, e[nivel.caja]]}>
+      <Text style={[e.avisoTitulo, e[nivel.titulo]]}>
+        {nivel.icono} {titulo.toUpperCase()}
       </Text>
-      <Text style={rojo ? e.avisoTextoRojo : e.avisoTextoAmarillo}>{mensaje.texto}</Text>
+      <Text style={e[nivel.texto]}>{mensaje.texto}</Text>
+
+      {punto && (
+        <MapaChico
+          punto={punto}
+          onPress={() => onVerMapa({ ...punto, titulo, texto: mensaje.texto })}
+        />
+      )}
+
       <Text style={e.avisoHora}>{formatoHora(mensaje.created_at)}</Text>
+    </View>
+  );
+}
+
+/**
+ * Un mapa chico con un punto, como una foto del lugar. Tocarlo lo abre
+ * en grande. Lo usan los avisos con ubicacion y los puntos de interes.
+ */
+function MapaChico({ punto, onPress }) {
+  return (
+    <Pressable
+      style={e.mapaChico}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel="Ver la ubicación en el mapa"
+    >
+      {/* pointerEvents none: el mapa chico no se arrastra. Asi el toque
+          llega al Pressable y, sobre todo, arrastrar encima no le roba el
+          scroll a la lista del chat. */}
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <MapView
+          style={StyleSheet.absoluteFill}
+          liteMode
+          mapType="hybrid"
+          userInterfaceStyle="dark"
+          scrollEnabled={false}
+          zoomEnabled={false}
+          rotateEnabled={false}
+          pitchEnabled={false}
+          toolbarEnabled={false}
+          initialRegion={{
+            latitude: punto.lat,
+            longitude: punto.lon,
+            latitudeDelta: 0.006,
+            longitudeDelta: 0.006,
+          }}
+        >
+          <Marker coordinate={{ latitude: punto.lat, longitude: punto.lon }} />
+        </MapView>
+      </View>
+      <View style={e.mapaChicoPie}>
+        <Text style={e.mapaChicoTexto}>Toca para ver en el mapa</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+/**
+ * Un punto de interes que compartio un propietario del grupo.
+ *
+ * El punto NO aparece solo en el mapa de cada miembro: cada uno decide
+ * si lo quiere con "Recibir punto de interes". Asi nadie amanece con el
+ * mapa lleno de marcas que no pidio. Al recibirlo se abre la pestaña Ruta
+ * con el mapa encima del punto.
+ */
+function PuntoMensaje({ mensaje, token, onVerMapa, onVerPunto }) {
+  const [recibiendo, setRecibiendo] = useState(false);
+  const [error, setError] = useState('');
+
+  async function recibir() {
+    setError('');
+    setRecibiendo(true);
+    const { ok, datos, sinRed } = await pedir('/api/points/receive', {
+      metodo: 'POST', token, cuerpo: { message_id: mensaje.id },
+    });
+    setRecibiendo(false);
+
+    if (sinRed) return setError('Sin conexión: no se pudo recibir el punto');
+    if (!ok) return setError(datos?.error || 'No se pudo recibir el punto');
+    if (onVerPunto) onVerPunto(datos.punto);
+  }
+
+  return (
+    <View style={[e.aviso, e.avisoInteres]}>
+      <View style={e.filaTituloInteres}>
+        <MaterialIcons name="place" size={16} color={C.interes} />
+        <Text style={[e.avisoTitulo, e.avisoTituloInteres]} numberOfLines={1}>
+          PUNTO DE INTERÉS · {mensaje.autor.toUpperCase()}
+        </Text>
+      </View>
+      <Text style={e.avisoTextoInteres}>{mensaje.texto}</Text>
+
+      {mensaje.punto && (
+        <MapaChico
+          punto={mensaje.punto}
+          onPress={() => onVerMapa({
+            ...mensaje.punto,
+            titulo: 'Punto de interés',
+            texto: `${mensaje.autor}: ${mensaje.texto}`,
+          })}
+        />
+      )}
+
+      <Pressable
+        style={[e.botonInteres, recibiendo && g.opaco]}
+        onPress={recibir}
+        disabled={recibiendo || !mensaje.punto}
+      >
+        {recibiendo
+          ? <ActivityIndicator color={C.fondo} size="small" />
+          : <Text style={e.textoBotonInteres}>Recibir punto de interés</Text>}
+      </Pressable>
+      {error !== '' && <Text style={g.error}>{error}</Text>}
+
+      <Text style={e.avisoHora}>{formatoHora(mensaje.created_at)}</Text>
+    </View>
+  );
+}
+
+/**
+ * El lugar de un aviso a pantalla completa. "Cómo llegar" abre la app
+ * de mapas del telefono con el punto marcado: si alguien cancelo su
+ * viaje a medio camino, lo siguiente que se quiere es ir a buscarlo.
+ */
+function MapaAviso({ aviso, onCerrar }) {
+  const coordenada = { latitude: aviso.lat, longitude: aviso.lon };
+
+  function comoLlegar() {
+    const q = `${aviso.lat},${aviso.lon}`;
+    Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${q}`).catch(() => {});
+  }
+
+  return (
+    <View style={g.pantalla}>
+      <MapView
+        style={StyleSheet.absoluteFill}
+        mapType="hybrid"
+        userInterfaceStyle="dark"
+        showsUserLocation
+        initialRegion={{ ...coordenada, latitudeDelta: 0.006, longitudeDelta: 0.006 }}
+      >
+        <Marker coordinate={coordenada} title={aviso.titulo} />
+      </MapView>
+
+      <SafeAreaView style={e.mapaGrandeArriba} pointerEvents="box-none">
+        <View style={e.mapaGrandeCaja}>
+          <Text style={e.mapaGrandeTitulo}>{aviso.titulo}</Text>
+          <Text style={e.mapaGrandeTexto}>{aviso.texto}</Text>
+        </View>
+      </SafeAreaView>
+
+      <View style={e.mapaGrandePie}>
+        <Pressable style={[g.boton, { flex: 1 }]} onPress={comoLlegar}>
+          <Text style={g.textoBoton}>Cómo llegar</Text>
+        </Pressable>
+        <Pressable style={[g.botonSecundario, e.botonCerrarMapa]} onPress={onCerrar}>
+          <Text style={g.textoSecundario}>Cerrar</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -530,7 +729,42 @@ const e = StyleSheet.create({
   avisoTituloAmarillo: { color: C.acento },
   avisoTextoRojo: { color: C.alertaTexto, fontSize: 15, lineHeight: 20 },
   avisoTextoAmarillo: { color: '#F2CE96', fontSize: 15, lineHeight: 20 },
+  avisoVerde: { backgroundColor: C.exitoFondo, borderColor: C.exito },
+  avisoTituloVerde: { color: C.exito },
+  avisoTextoVerde: { color: C.exitoTexto, fontSize: 15, lineHeight: 20 },
   avisoHora: { color: C.tenue, fontSize: 11, alignSelf: 'flex-end' },
+  avisoInteres: { backgroundColor: C.interesFondo, borderColor: C.interes },
+  filaTituloInteres: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  avisoTituloInteres: { color: C.interes, flexShrink: 1 },
+  avisoTextoInteres: { color: C.interesTexto, fontSize: 16, lineHeight: 21 },
+  botonInteres: {
+    height: 44, borderRadius: 10, marginTop: 4, backgroundColor: C.interes,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  textoBotonInteres: { color: C.fondo, fontSize: 15, fontWeight: '700' },
+
+  mapaChico: {
+    height: 140, borderRadius: 10, overflow: 'hidden', marginTop: 4,
+    backgroundColor: C.mapa, justifyContent: 'flex-end',
+  },
+  mapaChicoPie: {
+    backgroundColor: 'rgba(15,18,17,0.85)', paddingVertical: 6, paddingHorizontal: 10,
+  },
+  mapaChicoTexto: { color: C.texto, fontSize: 12, fontWeight: '600' },
+
+  mapaGrandeArriba: { position: 'absolute', top: 0, left: 0, right: 0 },
+  mapaGrandeCaja: {
+    margin: 16, padding: 14, gap: 4, borderRadius: 12,
+    backgroundColor: 'rgba(15,18,17,0.94)', borderWidth: 1, borderColor: C.borde,
+  },
+  mapaGrandeTitulo: { color: C.texto, fontSize: 16, fontWeight: '700' },
+  mapaGrandeTexto: { color: C.apagado, fontSize: 14, lineHeight: 19 },
+  mapaGrandePie: {
+    position: 'absolute', left: 0, right: 0, bottom: 0,
+    flexDirection: 'row', gap: 10, padding: 20, paddingBottom: 34,
+    backgroundColor: C.panel, borderTopWidth: 1, borderTopColor: C.borde,
+  },
+  botonCerrarMapa: { width: 110, height: 56 },
 
   previa: {
     flexDirection: 'row', alignItems: 'center', gap: 12,

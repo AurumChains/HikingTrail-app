@@ -23,3 +23,9 @@ export const API = NUBE;
 // export const API = LOCAL;
 
 export const CLAVE_TOKEN = 'geotrail_token';
+
+// Largo minimo de una contraseña. El backend exige lo mismo
+// (src/utils/password.js); revisarlo en la app solo evita el viaje al
+// servidor para un error que ya se sabe. Lo usan el registro y la
+// recuperacion de clave.
+export const LARGO_MINIMO_CLAVE = 6;

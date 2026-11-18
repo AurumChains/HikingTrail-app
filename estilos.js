@@ -24,6 +24,20 @@ export const C = {
   alertaFondo: '#1E1413',
   alertaTexto: '#F0A9A7',
 
+  // Avisos verdes: buenas noticias (llego, cambio de transporte). Un
+  // verde calmo y no el neon de la ruta: tiene que leerse como "todo
+  // bien", no competir con el camino en el mapa.
+  exito: '#5BC27A',
+  exitoFondo: '#0F1A13',
+  exitoTexto: '#A9E2B8',
+
+  // Puntos de interes: azul celeste. Es el unico color frio del mapa,
+  // asi no se confunde con la ruta (verde) ni con las alertas (rojo y
+  // ambar).
+  interes: '#5AC8FA',
+  interesFondo: '#0E1A21',
+  interesTexto: '#B9E6FC',
+
   // Lineas de ruta en el mapa.
   //
   // ruta: el camino sugerido, lo que falta por andar. Verde brillante

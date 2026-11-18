@@ -11,8 +11,10 @@ import { C, g } from '../estilos';
  * Cuando el login sale bien avisa hacia arriba con
  * onEntrar(usuario, token, password). No decide que pasa despues ni
  * guarda la sesion: eso lo maneja App.js, igual que para el registro.
+ *
+ * @param {string} aviso - mensaje al volver de recuperar la clave
  */
-export default function Login({ onEntrar, onIrARegistro }) {
+export default function Login({ onEntrar, onIrARegistro, onOlvideClave, aviso = '' }) {
   const [correo, setCorreo] = useState('test@example.com');
   const [password, setPassword] = useState('123456');
   const [cargando, setCargando] = useState(false);
@@ -73,6 +75,18 @@ export default function Login({ onEntrar, onIrARegistro }) {
             />
           </View>
 
+          <Pressable
+            style={e.olvide}
+            // Se lleva el correo escrito: quien olvido la clave casi
+            // siempre ya puso su correo antes de darse cuenta.
+            onPress={() => onOlvideClave(correo.trim())}
+            disabled={cargando}
+            hitSlop={8}
+          >
+            <Text style={e.olvideTexto}>¿Olvidaste tu contraseña?</Text>
+          </Pressable>
+
+          {aviso !== '' && error === '' && <Text style={g.aviso}>{aviso}</Text>}
           {error !== '' && <Text style={g.error}>{error}</Text>}
 
           <Pressable
@@ -105,4 +119,6 @@ const e = StyleSheet.create({
   enlace: { alignItems: 'center', paddingVertical: 8 },
   enlaceTexto: { color: C.apagado, fontSize: 15 },
   enlaceAcento: { color: C.acento, fontWeight: '600' },
+  olvide: { alignSelf: 'flex-end', marginTop: -6 },
+  olvideTexto: { color: C.acento, fontSize: 14, fontWeight: '500' },
 });

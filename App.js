@@ -11,6 +11,7 @@ import { migrarClavesAntiguas } from './migracionClaves';
 import { C, g } from './estilos';
 import Login from './pantallas/Login';
 import Registro from './pantallas/Registro';
+import RecuperarClave from './pantallas/RecuperarClave';
 import Montanista from './pantallas/Montanista';
 import Grupos from './pantallas/Grupos';
 import Ajustes from './pantallas/Ajustes';
@@ -32,8 +33,14 @@ export default function App() {
   const [revisando, setRevisando] = useState(true);
   const [modo, setModo] = useState('montanista');
   const [rutaActiva, setRutaActiva] = useState(false);
-  // Sin sesion: 'login' o 'registro'.
+  // Sin sesion: 'login', 'registro' o 'recuperar'.
   const [entrada, setEntrada] = useState('login');
+  // El correo que se llevo el login a "¿Olvidaste tu contraseña?", y el
+  // mensaje que se muestra al volver de ahi con la clave cambiada.
+  const [correoRecuperar, setCorreoRecuperar] = useState('');
+  const [avisoLogin, setAvisoLogin] = useState('');
+  // Un punto de interes que el chat pidio mostrar en el mapa, o null.
+  const [puntoEnfocado, setPuntoEnfocado] = useState(null);
 
   useEffect(() => {
     revisarSesionGuardada();
@@ -85,14 +92,15 @@ export default function App() {
     // El token va al almacen cifrado del telefono, no a un archivo suelto.
     await SecureStore.setItemAsync(CLAVE_TOKEN, t);
 
-    // Huella de la clave para confirmar la alerta de emergencia sin
-    // datos. Si fallara, la entrada sigue igual: la alerta tiene un
-    // respaldo que pregunta al servidor.
+    // Huella de la clave para destapar el codigo de invitacion de un
+    // grupo sin datos. Si fallara, la entrada sigue igual: ese codigo
+    // tiene un respaldo que pregunta al servidor.
     try {
       await guardarHuellaClave(password);
     } catch (e) { /* no bloquea la entrada */ }
 
     setEntrada('login');
+    setAvisoLogin('');
     setUsuario(u);
     setToken(t);
     await AsyncStorage.setItem(CLAVE_USUARIO, JSON.stringify(u));
@@ -107,6 +115,7 @@ export default function App() {
     setToken(null);
     setUsuario(null);
     setModo('montanista');
+    setPuntoEnfocado(null);
   }
 
   if (revisando) {
@@ -119,12 +128,37 @@ export default function App() {
   }
 
   if (!usuario) {
+    let pantalla;
+    if (entrada === 'registro') {
+      pantalla = <Registro onEntrar={entrar} onVolver={() => setEntrada('login')} />;
+    } else if (entrada === 'recuperar') {
+      // Salir de aqui (con "Volver" o "Cancelar") no cambia nada: la
+      // clave solo cambia con el ultimo boton de esa pantalla.
+      pantalla = (
+        <RecuperarClave
+          correoInicial={correoRecuperar}
+          onVolver={() => setEntrada('login')}
+          onListo={(mensaje) => { setAvisoLogin(mensaje); setEntrada('login'); }}
+        />
+      );
+    } else {
+      pantalla = (
+        <Login
+          aviso={avisoLogin}
+          onEntrar={entrar}
+          onIrARegistro={() => { setAvisoLogin(''); setEntrada('registro'); }}
+          onOlvideClave={(correo) => {
+            setAvisoLogin('');
+            setCorreoRecuperar(correo);
+            setEntrada('recuperar');
+          }}
+        />
+      );
+    }
     return (
       <>
         <StatusBar style="light" />
-        {entrada === 'registro'
-          ? <Registro onEntrar={entrar} onVolver={() => setEntrada('login')} />
-          : <Login onEntrar={entrar} onIrARegistro={() => setEntrada('registro')} />}
+        {pantalla}
       </>
     );
   }
@@ -145,9 +179,23 @@ export default function App() {
             usuario={usuario}
             visible={modo === 'montanista'}
             onCambioRuta={setRutaActiva}
+            puntoEnfocado={puntoEnfocado}
           />
         </View>
-        {modo === 'grupos' && <Grupos token={token} usuario={usuario} />}
+        {modo === 'grupos' && (
+          <Grupos
+            token={token}
+            usuario={usuario}
+            // "Recibir punto de interes" en el chat: se cambia a la
+            // pestaña Ruta y el mapa va hasta el punto. La marca de
+            // tiempo hace que pedir dos veces el mismo punto igual mueva
+            // el mapa.
+            onVerPunto={(punto) => {
+              setPuntoEnfocado({ ...punto, pedido: Date.now() });
+              setModo('montanista');
+            }}
+          />
+        )}
         {modo === 'ajustes' && <Ajustes token={token} usuario={usuario} onSalir={salir} />}
       </View>
 

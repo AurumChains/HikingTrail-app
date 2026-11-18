@@ -3,6 +3,7 @@ import {
   View, Text, Pressable, StyleSheet, ActivityIndicator, SafeAreaView,
 } from 'react-native';
 import MapView, { Polyline, Marker, Circle } from 'react-native-maps';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { io } from 'socket.io-client';
 import { pedir } from '../api';
 import { API } from '../config';
@@ -33,6 +34,9 @@ export default function EnVivo({ token, ruta, onVolver }) {
   // punto moviendose, sin saber si va bien o perdido.
   const [caminoPlan, setCaminoPlan] = useState(null);
   const [destino, setDestino] = useState(null);
+  // A pie o en auto: cambia como leer el mapa (un auto avanza mucho
+  // entre un punto y otro) y la persona lo puede cambiar en plena ruta.
+  const [modo, setModo] = useState('walking');
 
   // El ultimo aviso que empujo el servidor: desvio, vuelta al camino,
   // y mas adelante tambien detencion prolongada.
@@ -80,6 +84,7 @@ export default function EnVivo({ token, ruta, onVolver }) {
     setError('');
     setEstadisticas(datos.estadisticas);
     if (datos.ruta?.status) setEstado(datos.ruta.status);
+    if (datos.ruta?.travel_mode) setModo(datos.ruta.travel_mode);
     // Se pisa en cada recarga: si se desvio y el servidor le trazo un
     // camino nuevo, aqui llega el nuevo.
     setCaminoPlan(datos.camino || null);
@@ -151,6 +156,10 @@ export default function EnVivo({ token, ruta, onVolver }) {
         setTimeout(() => setAviso(null), 8000);
       }
     });
+
+    // Cambio de modo (a pie <-> en auto): el servidor ya le trazo el
+    // camino en el modo nuevo. Se trae al tiro, igual que tras un desvio.
+    socket.on('ruta_actualizada', () => cargarRuta());
   }
 
   function desconectar() {
@@ -275,7 +284,16 @@ export default function EnVivo({ token, ruta, onVolver }) {
 
           <View style={{ flex: 1 }}>
             <Text style={e.nombre}>{ruta.montanista}</Text>
-            <Text style={e.subnombre}>{ruta.name}</Text>
+            <View style={e.filaModo}>
+              <MaterialIcons
+                name={modo === 'driving' ? 'directions-car' : 'directions-walk'}
+                size={15}
+                color={C.apagado}
+              />
+              <Text style={e.subnombre} numberOfLines={1}>
+                {modo === 'driving' ? 'En auto' : 'A pie'} · {ruta.name}
+              </Text>
+            </View>
           </View>
 
           <View style={pausada ? e.chipPausa : (conexion === 'en_vivo' && !alerta ? e.chipVivo : e.chipMal)}>
@@ -317,7 +335,7 @@ export default function EnVivo({ token, ruta, onVolver }) {
             <Text style={e.pausaTitulo}>{ruta.montanista} está en pausa</Text>
             <Text style={e.pausaTexto}>
               Se detuvo a propósito. La ubicación no se actualiza mientras
-              esté en pausa, y vuelve sola si empieza a caminar.
+              esté en pausa, y vuelve sola si empieza a moverse.
             </Text>
           </View>
         )}
@@ -377,7 +395,8 @@ const e = StyleSheet.create({
   },
   flecha: { color: C.texto, fontSize: 26, lineHeight: 30, marginTop: -3 },
   nombre: { color: C.texto, fontSize: 18, fontWeight: '700' },
-  subnombre: { color: C.apagado, fontSize: 13 },
+  subnombre: { color: C.apagado, fontSize: 13, flexShrink: 1 },
+  filaModo: { flexDirection: 'row', alignItems: 'center', gap: 4 },
 
   chipVivo: {
     flexDirection: 'row', alignItems: 'center', gap: 6,

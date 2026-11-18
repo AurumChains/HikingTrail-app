@@ -6,6 +6,7 @@ import {
 import * as Location from 'expo-location';
 import * as Battery from 'expo-battery';
 import MapView, { Polyline, Marker } from 'react-native-maps';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { pedir } from '../api';
 import { API } from '../config';
 import { C, g } from '../estilos';
@@ -13,6 +14,9 @@ import {
   cargarCola, encolar, vaciarCola, limpiarCola,
   pendientes as contarPendientes,
 } from '../cola';
+import {
+  MarcadoresInteres, HojaCompartirPunto, HojaPunto, puntoBajoElDedo,
+} from './PuntosInteres';
 
 /**
  * La mitad "montañista": elegir destino, empezar ruta, seguir el GPS,
@@ -35,6 +39,20 @@ const METROS_PARA_REANUDAR = 60;
 // grupo.
 const REPORTE_ESTADO_MS = 60 * 1000;
 
+// Como se mueve la persona. El id es el que entiende el servidor
+// (active_routes.travel_mode); el icono es el peaton del semaforo y el
+// auto, que se entienden sin leer.
+const MODOS = [
+  { id: 'walking', icono: 'directions-walk', etiqueta: 'A pie', enFrase: 'caminando' },
+  { id: 'driving', icono: 'directions-car', etiqueta: 'En auto', enFrase: 'en auto' },
+];
+const modoInfo = (id) => MODOS.find((m) => m.id === id) || MODOS[0];
+
+// Cada cuantos metros se toma un punto GPS. En auto 15 y no 6: a 50 km/h
+// el auto avanza 14 m por segundo, y un punto cada 6 m llenaria la cola
+// y la base de puntos que no agregan nada a la linea del mapa.
+const METROS_ENTRE_PUNTOS = { walking: 6, driving: 15 };
+
 /**
  * Distancia en metros entre dos coordenadas (formula de Haversine).
  *
@@ -54,7 +72,9 @@ function distanciaMetros(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-export default function Montanista({ token, usuario, visible = true, onCambioRuta }) {
+export default function Montanista({
+  token, usuario, visible = true, onCambioRuta, puntoEnfocado = null,
+}) {
   const [ruta, setRuta] = useState(null);
   const [ubicacion, setUbicacion] = useState(null);
   const [puntos, setPuntos] = useState([]);
@@ -85,8 +105,29 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
   const [lugares, setLugares] = useState([]);
   const [destino, setDestino] = useState(null);
   const [caminoPlan, setCaminoPlan] = useState(null);   // lo que sugiere el servicio
-  const [infoPlan, setInfoPlan] = useState(null);       // "2,3 km" / "28 min"
+  const [infoPlan, setInfoPlan] = useState(null);       // { distancia, duracion, modo }
   const [calculando, setCalculando] = useState(false);
+
+  // A pie o en auto. Se elige antes de salir y se puede cambiar durante
+  // la ruta. Queda elegido para la proxima salida: quien va en auto al
+  // trabajo no tiene que tocarlo todos los dias.
+  const [modo, setModo] = useState('walking');
+  const [cambiandoModo, setCambiandoModo] = useState(false);
+
+  // Puntos de interes recibidos (ver PuntosInteres.js)
+  const [puntosInteres, setPuntosInteres] = useState([]);
+  // latitudeDelta del mapa a la vista: decide si se ven los comentarios.
+  const [zoom, setZoom] = useState(null);
+  // Donde se mantuvo pulsado el mapa para compartir un punto, o null.
+  const [coordCompartir, setCoordCompartir] = useState(null);
+  // El punto cuyo menu esta abierto, o null.
+  const [puntoAbierto, setPuntoAbierto] = useState(null);
+  // El punto recien recibido desde el chat: muestra su comentario aunque
+  // el mapa este lejos, por unos segundos.
+  const [destacado, setDestacado] = useState(null);
+  // Durante la ruta el mapa sigue a la persona. Al ir a ver un punto se
+  // suelta, o el mapa volveria a la persona al instante.
+  const [seguirme, setSeguirme] = useState(true);
 
   // Buscador por nombre
   const [busqueda, setBusqueda] = useState('');
@@ -118,6 +159,21 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
   const tokenRef = useRef(token);
   const suscripcion = useRef(null);
   const mapaInicio = useRef(null);
+  // El modo que lee escucharGPS al arrancar el GPS. Es un ref por lo
+  // mismo que rutaRef: se usa justo despues de cambiarlo, antes de que
+  // React vuelva a dibujar.
+  const modoRef = useRef('walking');
+  // Numero del ultimo pedido de camino. Si se toca "A pie" y "En auto"
+  // seguido, las respuestas pueden llegar al reves; solo vale la ultima.
+  const pedidoCamino = useRef(0);
+  const mapaRuta = useRef(null);
+  // La region a la vista, para saber si una pulsacion larga cayo sobre
+  // un punto de interes (puntoBajoElDedo).
+  const regionRef = useRef(null);
+  // El ultimo pedido de "ver este punto" ya atendido.
+  const enfocadoRef = useRef(null);
+  // Cuando fue la ultima pulsacion larga (ver tocarMapa).
+  const ultimaPulsacionLarga = useRef(0);
 
   // Vigilancia durante la pausa: donde se pauso, y el watcher de
   // baja precision que comprueba si la persona empezo a moverse.
@@ -149,6 +205,25 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
       cargarLugares();
     }
   }, [ruta, visible]);
+
+  // Los puntos de interes, en las dos pantallas. Al volver a la pestaña
+  // pudo haber recibido uno nuevo desde el chat.
+  useEffect(() => {
+    if (visible) cargarPuntos();
+  }, [visible]);
+
+  // El chat pidio mostrar un punto ("Recibir punto de interes").
+  useEffect(() => {
+    if (!visible || !puntoEnfocado || enfocadoRef.current === puntoEnfocado.pedido) return;
+    enfocadoRef.current = puntoEnfocado.pedido;
+    enfocarPunto(puntoEnfocado);
+  }, [puntoEnfocado, visible]);
+
+  useEffect(() => {
+    if (destacado === null) return;
+    const t = setTimeout(() => setDestacado(null), 20000);
+    return () => clearTimeout(t);
+  }, [destacado]);
 
   // ---------------- Permiso y posicion ----------------
 
@@ -207,9 +282,100 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     if (ok) setLugares(datos.lugares || []);
   }
 
+  // ---------------- Puntos de interes ----------------
+
+  async function cargarPuntos() {
+    const { ok, datos } = await pedir('/api/points', { token });
+    if (ok) setPuntosInteres(datos.puntos || []);
+  }
+
+  /** Lleva el mapa a la vista hasta un punto recien recibido. */
+  async function enfocarPunto(p) {
+    await cargarPuntos();
+    setDestacado(p.id);
+
+    const mapa = rutaRef.current ? mapaRuta.current : mapaInicio.current;
+    if (!mapa) {
+      return setMensaje('Punto guardado en tu mapa. Aparecerá cuando el mapa tenga tu ubicación.');
+    }
+    if (rutaRef.current) setSeguirme(false);
+
+    // Un instante para que la pestaña termine de mostrarse: un mapa que
+    // se anima estando oculto no se mueve.
+    setTimeout(() => {
+      mapa.animateToRegion(
+        { latitude: p.lat, longitude: p.lon, latitudeDelta: 0.0025, longitudeDelta: 0.0025 },
+        700
+      );
+    }, 350);
+  }
+
+  function cambioRegion(region) {
+    regionRef.current = region;
+    setZoom(region.latitudeDelta);
+  }
+
+  /**
+   * Mantener pulsado el mapa. Si cayo sobre un punto de interes, abre su
+   * menu; si no, ofrece compartir ese lugar.
+   */
+  function mantenerMapa(evento) {
+    ultimaPulsacionLarga.current = Date.now();
+    const c = evento.nativeEvent.coordinate;
+    if (!c) return;
+
+    const p = puntoBajoElDedo(puntosInteres, c, regionRef.current);
+    if (p) return setPuntoAbierto(p);
+
+    // Los grupos (y en cuales es propietario) pueden haber cambiado,
+    // sobre todo durante una ruta, que no los recarga.
+    cargarGrupos();
+    setCoordCompartir({ latitude: c.latitude, longitude: c.longitude });
+  }
+
+  function cambioPunto({ eliminado, punto }) {
+    if (eliminado) setPuntosInteres((l) => l.filter((x) => x.id !== eliminado));
+    if (punto) setPuntosInteres((l) => l.map((x) => (x.id === punto.id ? punto : x)));
+    setPuntoAbierto(null);
+    setMensaje(eliminado ? 'Punto eliminado de tu mapa.' : 'El punto quedó permanente en tu mapa.');
+  }
+
+  function volverAMi() {
+    setSeguirme(true);
+    if (ubicacion && mapaRuta.current) {
+      mapaRuta.current.animateToRegion({
+        latitude: ubicacion.latitude, longitude: ubicacion.longitude,
+        latitudeDelta: 0.004, longitudeDelta: 0.004,
+      }, 600);
+    }
+  }
+
+  // Las mismas dos hojas en las dos pantallas (antes de salir y en ruta).
+  const hojasInteres = (
+    <>
+      <HojaCompartirPunto
+        coordenada={coordCompartir}
+        grupos={grupos}
+        token={token}
+        onCerrar={() => setCoordCompartir(null)}
+        onCompartido={(texto) => { setCoordCompartir(null); setMensaje(texto); }}
+      />
+      <HojaPunto
+        punto={puntoAbierto}
+        token={token}
+        onCerrar={() => setPuntoAbierto(null)}
+        onCambio={cambioPunto}
+      />
+    </>
+  );
+
   // ---------------- Camino sugerido ----------------
 
   function quitarDestino() {
+    // Un camino que todavia venia en camino ya no tiene destino al que
+    // pertenecer: se descarta al llegar.
+    pedidoCamino.current++;
+    setCalculando(false);
     setDestino(null);
     setCaminoPlan(null);
     setInfoPlan(null);
@@ -229,28 +395,51 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     }
 
     setDestino(nuevo);
+    setResultados([]);
+    await pedirCamino(nuevo, modo);
+  }
+
+  /**
+   * Antes de salir: cambiar entre a pie y en auto vuelve a pedir el
+   * camino, porque no es el mismo (en auto no se cruza una plaza, a pie
+   * no se toma la autopista).
+   */
+  function elegirModo(nuevo) {
+    if (nuevo === modo) return;
+    setModo(nuevo);
+    modoRef.current = nuevo;
+    if (destino) pedirCamino(destino, nuevo);
+  }
+
+  /** Pide al servidor el camino hasta `dest` en el modo indicado. */
+  async function pedirCamino(dest, modoCamino) {
     setCaminoPlan(null);
     setInfoPlan(null);
     setMensaje('');
-    setResultados([]);
 
     if (!posicionActual) {
       setMensaje('Necesito tu ubicación para calcular el camino');
       return;
     }
 
+    const numero = ++pedidoCamino.current;
     setCalculando(true);
     const { ok, datos, sinRed } = await pedir('/api/routes/preview', {
       metodo: 'POST', token,
       cuerpo: {
-        place_id: nuevo.place_id || null,
-        dest_lat: nuevo.place_id ? null : nuevo.lat,
-        dest_lon: nuevo.place_id ? null : nuevo.lon,
-        dest_name: nuevo.name,
+        place_id: dest.place_id || null,
+        dest_lat: dest.place_id ? null : dest.lat,
+        dest_lon: dest.place_id ? null : dest.lon,
+        dest_name: dest.name,
         lat: posicionActual.latitude,
         lon: posicionActual.longitude,
+        modo: modoCamino,
       },
     });
+
+    // Mientras esperaba, la persona pidio otro camino (otro destino u
+    // otro modo): esta respuesta ya no es la que esta mirando.
+    if (numero !== pedidoCamino.current) return;
     setCalculando(false);
 
     if (sinRed) return setMensaje('No hay conexión con el servidor');
@@ -263,6 +452,7 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     setInfoPlan({
       distancia: datos.distancia_texto,
       duracion: datos.duracion_texto,
+      modo: modoCamino,
     });
 
     // Encuadrar el mapa para que se vea el camino completo, no solo
@@ -286,6 +476,13 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
    * mapa" hasta que la persona lo bautice al guardarlo.
    */
   function tocarMapa(evento) {
+    // Tocar un marcador (un punto de interes, para leer su comentario)
+    // en iPhone tambien llega como toque del mapa: no es "voy ahi".
+    if (evento.nativeEvent.action === 'marker-press') return;
+    // Y el final de una pulsacion larga puede llegar como toque: esa
+    // pulsacion ya abrio la hoja de puntos de interes.
+    if (Date.now() - ultimaPulsacionLarga.current < 1000) return;
+
     const c = evento.nativeEvent.coordinate;
     if (!c) return;
     fijarDestino({ name: 'Punto en el mapa', lat: c.latitude, lon: c.longitude });
@@ -347,7 +544,11 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
 
   async function escucharGPS() {
     suscripcion.current = await Location.watchPositionAsync(
-      { accuracy: Location.Accuracy.High, timeInterval: 4000, distanceInterval: 6 },
+      {
+        accuracy: Location.Accuracy.High,
+        timeInterval: 4000,
+        distanceInterval: METROS_ENTRE_PUNTOS[modoRef.current] || METROS_ENTRE_PUNTOS.walking,
+      },
       (posicion) => {
         const c = posicion.coords;
         setUbicacion(c);
@@ -540,6 +741,7 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
         dest_name: destino ? destino.name : null,
         lat: posicionActual ? posicionActual.latitude : null,
         lon: posicionActual ? posicionActual.longitude : null,
+        modo,
       },
     });
 
@@ -556,6 +758,9 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     }
 
     rutaRef.current = datos.ruta.id;
+    const modoGuardado = datos.ruta.travel_mode || modo;
+    modoRef.current = modoGuardado;
+    setModo(modoGuardado);
     setRuta(datos.ruta);
 
     // El servidor devuelve el camino que de verdad guardo. Puede no ser
@@ -622,12 +827,21 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     }));
 
     rutaRef.current = datos.ruta.id;
+    // El modo con el que iba: decide cada cuantos metros se toma un
+    // punto al volver a encender el GPS mas abajo.
+    const modoGuardado = datos.ruta.travel_mode || 'walking';
+    modoRef.current = modoGuardado;
+    setModo(modoGuardado);
     setPuntos(recorridos);
     setEnviados(recorridos.length);
     setCaminoPlan(datos.camino || null);
     setDestino(datos.destino || null);
     if (datos.plan) {
-      setInfoPlan({ distancia: datos.plan.distancia_texto, duracion: datos.plan.duracion_texto });
+      setInfoPlan({
+        distancia: datos.plan.distancia_texto,
+        duracion: datos.plan.duracion_texto,
+        modo: modoGuardado,
+      });
     }
     setDesvio(null);
     setEstadisticas(null);
@@ -721,8 +935,71 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     await escucharGPS();
   }
 
+  /**
+   * Cambiar de a pie a auto (o al reves) sin terminar la ruta.
+   *
+   * El servidor guarda el modo, traza el camino de nuevo en el modo
+   * nuevo desde donde esta la persona y avisa al grupo. Aqui se cambia
+   * el camino del mapa y cada cuantos metros se toma un punto.
+   *
+   * Sin conexion no se cambia: el modo decide el desvio en el servidor,
+   * y si el telefono creyera ir en auto mientras el servidor sigue en
+   * "a pie", los avisos no coincidirian con lo que se ve en pantalla.
+   */
+  async function cambiarModoEnRuta(nuevo) {
+    if (nuevo === modo || cambiandoModo) return;
+
+    setMensaje('');
+    setCambiandoModo(true);
+    const { ok, datos, sinRed } = await pedir(`/api/routes/${rutaRef.current}/mode`, {
+      metodo: 'POST', token,
+      cuerpo: {
+        modo: nuevo,
+        lat: ubicacion ? ubicacion.latitude : undefined,
+        lon: ubicacion ? ubicacion.longitude : undefined,
+      },
+    });
+    setCambiandoModo(false);
+
+    if (sinRed) return setMensaje('Sin conexión: no se pudo cambiar el modo de transporte');
+    if (!ok) return setMensaje(datos?.error || 'No se pudo cambiar el modo de transporte');
+
+    modoRef.current = datos.modo;
+    setModo(datos.modo);
+    setDesvio(null);
+    setAvisoNuevoCamino(null);
+
+    if (datos.camino && datos.camino.length > 1) {
+      setCaminoPlan(datos.camino);
+      setInfoPlan({
+        distancia: datos.distancia_texto,
+        duracion: datos.duracion_texto,
+        modo: datos.modo,
+      });
+    }
+
+    // El GPS se vuelve a encender con la distancia entre puntos del modo
+    // nuevo. En pausa no hay GPS de alta precision: lo tomara al
+    // reanudar, porque escucharGPS lee modoRef.
+    if (!pausada) {
+      soltarGPS();
+      await escucharGPS();
+    }
+
+    const frase = datos.modo === 'driving' ? 'Ahora vas en auto.' : 'Ahora vas a pie.';
+    setMensaje(
+      datos.aviso ||
+      (ruta?.group_id ? `${frase} Tu grupo recibió un aviso.` : frase)
+    );
+  }
+
   async function terminarRuta() {
     const rutaId = rutaRef.current;
+    // Donde termina: el servidor la compara con el destino para avisar
+    // al grupo si llego o si cancelo el viaje (y donde).
+    const final = ubicacion
+      ? { lat: ubicacion.latitude, lon: ubicacion.longitude }
+      : undefined;
     soltarGPS();
     soltarVigilancia();
 
@@ -733,10 +1010,10 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
     }
 
     const { ok, datos } = await pedir(
-      `/api/routes/${rutaId}/finish`, { metodo: 'POST', token }
+      `/api/routes/${rutaId}/finish`, { metodo: 'POST', token, cuerpo: final }
     );
 
-    if (ok) setEstadisticas(datos.estadisticas);
+    if (ok) setEstadisticas({ ...datos.estadisticas, resultado: datos.resultado });
     else setMensaje(datos?.error || 'No se pudo terminar');
 
     rutaRef.current = null;
@@ -767,11 +1044,14 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
 
   /** La linea de abajo de la cabecera, cuando el panel esta plegado. */
   function resumenPlegado() {
-    if (infoPlan) return `${infoPlan.distancia} · ${infoPlan.duracion} caminando`;
+    if (infoPlan) {
+      return `${infoPlan.distancia} · ${infoPlan.duracion} ${modoInfo(infoPlan.modo).enFrase}`;
+    }
     if (destino) return 'Sin camino calculado';
 
     const gr = grupos.find((x) => x.id === grupoElegido);
-    return gr ? `${gr.name} te verá` : 'Nadie te verá';
+    const quien = gr ? `${gr.name} te verá` : 'Nadie te verá';
+    return `${quien} · ${modoInfo(modo).etiqueta.toLowerCase()}`;
   }
 
   // ---------------- Pantalla: ruta en curso ----------------
@@ -781,11 +1061,17 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
       <View style={g.pantalla}>
         {ubicacion ? (
           <MapView
+            ref={mapaRuta}
             style={StyleSheet.absoluteFill}
             mapType="hybrid"
             userInterfaceStyle="dark"
             showsUserLocation
-            followsUserLocation
+            followsUserLocation={seguirme}
+            onLongPress={mantenerMapa}
+            onRegionChangeComplete={cambioRegion}
+            // Arrastrar el mapa a mano tambien suelta el seguimiento: si
+            // no, en iPhone volveria a la persona apenas se suelta.
+            onPanDrag={() => { if (seguirme) setSeguirme(false); }}
             initialRegion={{
               latitude: ubicacion.latitude,
               longitude: ubicacion.longitude,
@@ -826,6 +1112,12 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
                 description="Destino"
               />
             )}
+            <MarcadoresInteres
+              puntos={puntosInteres}
+              zoom={zoom}
+              destacado={destacado}
+              onAbrir={setPuntoAbierto}
+            />
           </MapView>
         ) : (
           <View style={g.centrado}>
@@ -859,11 +1151,28 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
               <Text style={e.textoNuevoCamino}>{avisoNuevoCamino}</Text>
             </Pressable>
           )}
+
+          {!seguirme && (
+            <Pressable style={e.chipVolver} onPress={volverAMi}>
+              <MaterialIcons name="my-location" size={16} color={C.acento} />
+              <Text style={e.chipTextoVolver}>Volver a mi ubicación</Text>
+            </Pressable>
+          )}
         </SafeAreaView>
 
         <View style={e.panel}>
           <View style={e.agarradera} />
-          <Text style={e.nombreRuta}>{ruta.name}</Text>
+          <View style={e.filaNombre}>
+            <Text style={[e.nombreRuta, { flex: 1 }]} numberOfLines={2}>{ruta.name}</Text>
+            {/* Se cambia sin terminar la ruta: bajarse del auto y seguir
+                a pie es la misma salida, y el grupo la sigue viendo igual. */}
+            <SelectorModo
+              compacto
+              modo={modo}
+              ocupado={cambiandoModo}
+              onCambiar={cambiarModoEnRuta}
+            />
+          </View>
 
           <View style={e.grilla}>
             <View style={e.celda}>
@@ -922,6 +1231,8 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
             </Pressable>
           </View>
         </View>
+
+        {hojasInteres}
       </View>
     );
   }
@@ -941,6 +1252,10 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
           // Es la unica forma de elegir un sitio que no tiene nombre
           // ni esta guardado: "voy a esa esquina".
           onPress={tocarMapa}
+          // Mantener pulsado: compartir un punto de interes, o abrir el
+          // menu de uno que ya esta en el mapa.
+          onLongPress={mantenerMapa}
+          onRegionChangeComplete={cambioRegion}
           initialRegion={{
             latitude: posicionActual.latitude,
             longitude: posicionActual.longitude,
@@ -964,6 +1279,12 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
               description="Destino"
             />
           )}
+          <MarcadoresInteres
+            puntos={puntosInteres}
+            zoom={zoom}
+            destacado={destacado}
+            onAbrir={setPuntoAbierto}
+          />
         </MapView>
       ) : (
         <View style={[StyleSheet.absoluteFill, g.centrado]}>
@@ -1018,12 +1339,19 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
           {estadisticas && (
             <View style={e.tarjetaResumen}>
               <Text style={g.etiqueta}>ÚLTIMA RUTA</Text>
+              {estadisticas.resultado === 'llego' && (
+                <Text style={e.resultadoLlego}>Llegaste a tu destino</Text>
+              )}
+              {estadisticas.resultado === 'cancelado' && (
+                <Text style={e.resultadoCancelado}>Terminaste antes de llegar al destino</Text>
+              )}
               <View style={g.fila}>
                 <Text style={g.dato}>Distancia</Text>
                 <Text style={g.valorGrande}>{estadisticas.distancia_metros} m</Text>
               </View>
               <View style={g.fila}>
-                <Text style={g.dato}>Caminando</Text>
+                {/* "En movimiento" y no "Caminando": pudo ir en auto. */}
+                <Text style={g.dato}>En movimiento</Text>
                 <Text style={g.valor}>{estadisticas.tiempo_caminando}</Text>
               </View>
               <View style={g.fila}>
@@ -1128,6 +1456,14 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
             )}
           </View>
 
+          {/* Debajo de los lugares guardados: primero a donde, despues
+              como. El modo cambia el camino, asi que se ve el camino
+              nuevo apenas se toca. */}
+          <View style={{ gap: 10 }}>
+            <Text style={g.etiqueta}>¿CÓMO VAS?</Text>
+            <SelectorModo modo={modo} onCambiar={elegirModo} />
+          </View>
+
           {calculando && (
             <View style={e.filaCalculando}>
               <ActivityIndicator color={C.acento} size="small" />
@@ -1140,7 +1476,7 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
               <Text style={e.planFuerte}>{infoPlan.distancia}</Text>
               <Text style={g.subtexto}>·</Text>
               <Text style={e.planFuerte}>{infoPlan.duracion}</Text>
-              <Text style={g.subtexto}>caminando</Text>
+              <Text style={g.subtexto}>{modoInfo(infoPlan.modo).enFrase}</Text>
             </View>
           )}
 
@@ -1205,12 +1541,81 @@ export default function Montanista({ token, usuario, visible = true, onCambioRut
           </Pressable>
         </View>
       </View>
+
+      {hojasInteres}
+    </View>
+  );
+}
+
+/**
+ * A pie / en auto. Dos botones, uno marcado.
+ *
+ * Grande (con texto) antes de salir, donde hay espacio y se elige con
+ * calma. Compacto (solo iconos) durante la ruta, junto al nombre: ahi
+ * el panel ya esta lleno y los dos dibujos se entienden solos.
+ */
+function SelectorModo({ modo, onCambiar, compacto = false, ocupado = false }) {
+  return (
+    <View style={compacto ? e.modoCompacto : e.modoFila} accessibilityRole="radiogroup">
+      {MODOS.map((op) => {
+        const activo = modo === op.id;
+        return (
+          <Pressable
+            key={op.id}
+            style={[
+              compacto ? e.modoBotonChico : e.modoBoton,
+              activo && e.modoBotonActivo,
+              ocupado && !activo && g.opaco,
+            ]}
+            onPress={() => onCambiar(op.id)}
+            disabled={ocupado}
+            hitSlop={compacto ? 4 : 0}
+            accessibilityRole="radio"
+            accessibilityState={{ selected: activo, busy: ocupado }}
+            accessibilityLabel={op.etiqueta}
+          >
+            {ocupado && !activo ? (
+              <ActivityIndicator color={C.apagado} size="small" />
+            ) : (
+              <MaterialIcons
+                name={op.icono}
+                size={compacto ? 24 : 26}
+                color={activo ? C.acento : C.apagado}
+              />
+            )}
+            {!compacto && (
+              <Text style={activo ? e.opcionTextoActivo : e.opcionTexto}>{op.etiqueta}</Text>
+            )}
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
 
 const e = StyleSheet.create({
   pista: { color: C.tenue, fontSize: 13, lineHeight: 19 },
+
+  // Selector a pie / en auto
+  modoFila: { flexDirection: 'row', gap: 10 },
+  modoBoton: {
+    flex: 1, height: 54, flexDirection: 'row', gap: 8,
+    alignItems: 'center', justifyContent: 'center',
+    borderRadius: 12, borderWidth: 1, borderColor: C.borde, backgroundColor: C.superficie,
+  },
+  modoCompacto: {
+    flexDirection: 'row', padding: 3, gap: 3, borderRadius: 12,
+    borderWidth: 1, borderColor: C.borde, backgroundColor: C.superficie,
+  },
+  modoBotonChico: {
+    width: 46, height: 40, borderRadius: 9,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'transparent',
+  },
+  modoBotonActivo: { borderColor: C.acento, backgroundColor: 'rgba(233,164,74,0.14)' },
+  filaNombre: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  resultadoLlego: { color: C.exito, fontSize: 15, fontWeight: '600' },
+  resultadoCancelado: { color: C.acento, fontSize: 15, fontWeight: '600' },
 
   opciones: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   opcion: {
@@ -1249,6 +1654,12 @@ const e = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, marginTop: 8,
   },
   chipTextoDesvio: { color: C.alertaTexto, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  chipVolver: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(15,18,17,0.92)', borderWidth: 1, borderColor: '#4A3A1E',
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, marginTop: 8,
+  },
+  chipTextoVolver: { color: C.acento, fontSize: 13, fontWeight: '600' },
   // Amarillo, como el aviso que le llega al grupo: es informacion, no
   // una alarma.
   cajaNuevoCamino: {

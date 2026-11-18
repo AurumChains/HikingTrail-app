@@ -5,12 +5,29 @@ import {
 } from 'react-native';
 import * as Location from 'expo-location';
 import * as SMS from 'expo-sms';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { pedir } from '../api';
 import { C, g } from '../estilos';
 import {
-  guardarHuellaClave, verificarClaveLocal, guardarContactosLocal,
-  leerContactosLocal, armarMensaje,
+  guardarContactosLocal, leerContactosLocal, armarMensaje, estadoSatelital,
 } from '../emergencia';
+
+// Lo que se dice bajo el boton de emergencia segun la compañia del chip
+// (ver estadoSatelital en emergencia.js).
+const TEXTO_SATELITE = {
+  entel: {
+    ok: true,
+    texto: 'Tienes Entel: si no hay señal, la alerta puede salir por satélite (Starlink), siempre que tu teléfono sea compatible.',
+  },
+  otra: {
+    ok: false,
+    texto: 'Tu compañía no ofrece SMS por satélite: la alerta solo saldrá si tienes señal.',
+  },
+  desconocida: {
+    ok: false,
+    texto: 'No pudimos saber tu compañía. Con Entel y un teléfono compatible, la alerta puede salir por satélite; si no, necesita señal.',
+  },
+};
 
 // Cuanto se espera una posicion GPS fresca antes de conformarse con
 // la ultima conocida. En una emergencia no se puede esperar para
@@ -21,9 +38,9 @@ const ESPERA_GPS_MS = 15000;
  * Ajustes de la cuenta y de la seguridad.
  *
  * La alerta de emergencia esta pensada para funcionar SIN DATOS: lee
- * los contactos y comprueba la clave en el telefono (ver
- * emergencia.js). El servidor solo se usa para elegir los contactos y
- * guardar el telefono propio, cosas que se hacen con calma y con red.
+ * los contactos guardados en el telefono (ver emergencia.js). El
+ * servidor solo se usa para elegir los contactos y guardar el telefono
+ * propio, cosas que se hacen con calma y con red.
  */
 export default function Ajustes({ token, usuario, onSalir }) {
   // Telefono propio
@@ -43,9 +60,12 @@ export default function Ajustes({ token, usuario, onSalir }) {
   // Alerta
   const [modalAbierto, setModalAbierto] = useState(false);
   const [resultadoAlerta, setResultadoAlerta] = useState(null);
+  // 'entel' | 'otra' | 'desconocida', o null mientras se averigua
+  const [satelite, setSatelite] = useState(null);
 
   useEffect(() => {
     cargar();
+    estadoSatelital().then(setSatelite);
   }, []);
 
   async function cargar() {
@@ -154,6 +174,21 @@ export default function Ajustes({ token, usuario, onSalir }) {
           >
             <Text style={e.textoBotonEmergencia}>Enviar alerta de emergencia</Text>
           </Pressable>
+
+          {/* Justo bajo el boton: es lo que hay que saber ANTES de
+              necesitarlo, no en el cerro sin señal. */}
+          {satelite && (
+            <View style={e.filaSatelite}>
+              <MaterialIcons
+                name={TEXTO_SATELITE[satelite].ok ? 'satellite-alt' : 'signal-cellular-alt'}
+                size={18}
+                color={TEXTO_SATELITE[satelite].ok ? C.exito : C.apagado}
+              />
+              <Text style={TEXTO_SATELITE[satelite].ok ? e.textoSateliteOk : e.textoSatelite}>
+                {TEXTO_SATELITE[satelite].texto}
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* ---------- Contactos de emergencia ---------- */}
@@ -247,19 +282,41 @@ export default function Ajustes({ token, usuario, onSalir }) {
           </View>
         </View>
 
-        {/* ---------- Avisos automaticos ---------- */}
+        {/* ---------- Avisos automaticos ----------
+            La lista completa de lo que publica el servidor en el chat
+            (src/utils/mensajesGrupo.js en el backend), con el mismo
+            color con que aparece alla. Si se agrega un aviso nuevo, va
+            aqui tambien. */}
         <View style={g.tarjeta}>
           <Text style={g.etiqueta}>AVISOS AUTOMÁTICOS AL GRUPO</Text>
           <Text style={e.pista}>
             Mientras tienes una ruta compartida con un grupo, el chat de ese
             grupo recibe un aviso cuando:
           </Text>
-          <Aviso rojo titulo="Desactivas la ubicación"
+
+          <Aviso nivel="rojo" titulo="Desactivas la ubicación"
             texto="Tu familia sabe que deja de ver tu posición real." />
-          <Aviso rojo titulo="Tu teléfono deja de reportar"
+          <Aviso nivel="rojo" titulo="Tu teléfono deja de reportar"
             texto="5 minutos sin noticias: sin señal, sin batería, apagado o con la app cerrada." />
-          <Aviso titulo="Te queda poca batería"
+
+          <Aviso nivel="amarillo" titulo="Vuelves a activar la ubicación"
+            texto="Tu grupo vuelve a ver tu posición real." />
+          <Aviso nivel="amarillo" titulo="Tu teléfono vuelve a reportar"
+            texto="Después de haber dejado de reportar." />
+          <Aviso nivel="amarillo" titulo="Te queda poca batería"
             texto="Al bajar del 15% sin estar cargando." />
+          <Aviso nivel="amarillo" titulo="Te alejas del camino"
+            texto="Más de 100 m a pie o 150 m en auto. La app te traza un camino nuevo desde donde estás." />
+          <Aviso nivel="amarillo" titulo="Cancelas tu viaje"
+            texto="Terminas la ruta lejos del destino. Incluye en qué calle quedaste y tu ubicación en el mapa." />
+
+          <Aviso nivel="verde" titulo="Cambias tu modo de transporte"
+            texto="Pasas de a pie a auto, o al revés, sin terminar la ruta." />
+          <Aviso nivel="verde" titulo="Llegas a tu destino"
+            texto="Terminas la ruta cerca del destino. Incluye tu ubicación en el mapa." />
+          <Aviso nivel="verde" titulo="Terminas una ruta sin destino"
+            texto="Incluye dónde la terminaste y tu ubicación en el mapa." />
+
           <Text style={e.pista}>
             Si eliges “Solo yo” al empezar la ruta, no se avisa a nadie.
           </Text>
@@ -272,7 +329,6 @@ export default function Ajustes({ token, usuario, onSalir }) {
 
       <ConfirmarAlerta
         visible={modalAbierto}
-        token={token}
         usuario={usuario}
         onCerrar={() => setModalAbierto(false)}
         onResultado={(r) => { setModalAbierto(false); setResultadoAlerta(r); }}
@@ -282,58 +338,36 @@ export default function Ajustes({ token, usuario, onSalir }) {
 }
 
 /**
- * Ventana de confirmacion: nota opcional + contrasena.
+ * Ventana de confirmacion: nota opcional y un boton.
  *
- * La contrasena evita que la alerta salga por un toque accidental en
- * el bolsillo o porque otra persona tomo el telefono.
+ * NO pide contrasena. En una emergencia puede no haber tiempo, calma ni
+ * manos para escribirla (una caida, frio, alguien ayudando que no la
+ * sabe), y una alerta real bloqueada por una clave mal escrita es mucho
+ * peor que una falsa. Contra el toque accidental en el bolsillo basta
+ * con lo que ya hay: abrir esta ventana, tocar "Enviar alerta" y despues
+ * tocar "Enviar" en la app de mensajes del telefono.
  */
-function ConfirmarAlerta({ visible, token, usuario, onCerrar, onResultado }) {
+function ConfirmarAlerta({ visible, usuario, onCerrar, onResultado }) {
   const [nota, setNota] = useState('');
-  const [clave, setClave] = useState('');
   const [error, setError] = useState('');
   const [paso, setPaso] = useState('');   // texto de lo que esta haciendo
 
   useEffect(() => {
-    if (visible) { setNota(''); setClave(''); setError(''); setPaso(''); }
+    if (visible) { setNota(''); setError(''); setPaso(''); }
   }, [visible]);
 
   async function confirmar() {
-    if (!clave) return setError('Escribe tu contraseña');
     setError('');
 
     // 1. Contactos (del telefono: tiene que funcionar sin datos)
     const contactos = await leerContactosLocal();
     if (contactos.length === 0) return setError('No tienes contactos de emergencia con teléfono');
 
-    // 2. Contrasena
-    setPaso('Comprobando contraseña…');
-    const local = await verificarClaveLocal(clave);
-    if (local === false) { setPaso(''); return setError('Contraseña incorrecta'); }
-
-    if (local === null) {
-      // No hay huella en el telefono (sesion de antes de esta version).
-      // Se pregunta al servidor y, si acierta, se guarda la huella para
-      // la proxima vez.
-      const { ok, status, sinRed } = await pedir('/api/auth/verify-password', {
-        metodo: 'POST', token, cuerpo: { password: clave },
-      });
-      if (ok) {
-        await guardarHuellaClave(clave);
-      } else if (!sinRed) {
-        setPaso('');
-        return setError(status === 401 ? 'Contraseña incorrecta' : 'No se pudo comprobar la contraseña');
-      }
-      // Sin red y sin huella no hay forma de comprobarla. Se deja
-      // pasar: bloquear una alerta de emergencia real es peor que
-      // dejar salir una falsa. Pasa una sola vez: al volver a iniciar
-      // sesion la huella queda guardada.
-    }
-
-    // 3. Ubicacion
+    // 2. Ubicacion
     setPaso('Obteniendo tu ubicación…');
     const posicion = await obtenerPosicion();
 
-    // 4. SMS
+    // 3. SMS
     setPaso('Abriendo mensajes…');
     if (!(await SMS.isAvailableAsync())) {
       setPaso('');
@@ -390,19 +424,6 @@ function ConfirmarAlerta({ visible, token, usuario, onCerrar, onResultado }) {
             />
           </View>
 
-          <View style={g.campo}>
-            <Text style={g.etiqueta}>TU CONTRASEÑA</Text>
-            <TextInput
-              style={g.input}
-              value={clave}
-              onChangeText={setClave}
-              placeholder="••••••••"
-              placeholderTextColor={C.placeholder}
-              secureTextEntry
-              editable={!ocupado}
-            />
-          </View>
-
           {error !== '' && <Text style={g.error}>{error}</Text>}
           {ocupado && (
             <View style={e.filaPaso}>
@@ -452,10 +473,16 @@ async function obtenerPosicion() {
   }
 }
 
-function Aviso({ rojo, titulo, texto }) {
+// Los mismos tres colores que usan los avisos en el chat del grupo.
+const COLOR_NIVEL = { rojo: C.alerta, amarillo: C.acento, verde: C.exito };
+
+function Aviso({ nivel, titulo, texto }) {
   return (
     <View style={e.aviso}>
-      <View style={[e.punto, { backgroundColor: rojo ? C.alerta : C.acento }]} />
+      <View
+        style={[e.punto, { backgroundColor: COLOR_NIVEL[nivel] || C.acento }]}
+        accessibilityLabel={`Aviso ${nivel}`}
+      />
       <View style={{ flex: 1, gap: 2 }}>
         <Text style={e.avisoTitulo}>{titulo}</Text>
         <Text style={e.pista}>{texto}</Text>
@@ -482,6 +509,9 @@ const e = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   textoBotonEmergencia: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
+  filaSatelite: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  textoSatelite: { color: C.apagado, fontSize: 13, lineHeight: 19, flex: 1 },
+  textoSateliteOk: { color: C.exitoTexto, fontSize: 13, lineHeight: 19, flex: 1 },
 
   // Contactos
   contacto: {
